@@ -1,0 +1,2 @@
+547:    def deauth_client(self, ap_bssid: str, client_mac: str, count: int = 5) -> bool:
+594:    def deauth_network(self, ap_bssid: str, count: int = 5) -> bool:

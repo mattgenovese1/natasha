@@ -1,0 +1,31 @@
+    def _init_components(self):
+        """Initialize all components."""
+        try:
+            # Create directories
+            os.makedirs(os.path.join(os.path.expanduser("~"), "natasha", "logs"), exist_ok=True)
+            os.makedirs(os.path.join(os.path.expanduser("~"), "natasha", "scripts"), exist_ok=True)
+            os.makedirs(os.path.join(os.path.expanduser("~"), "natasha", "captures"), exist_ok=True)
+            
+            # Initialize display
+            logging.info("Initializing display...")
+            self.display = DisplayInterface()
+            
+            # Show splash screen
+            self.display.draw_splash_screen()
+            time.sleep(2)
+            
+            # Initialize AI engine
+            logging.info("Initializing AI engine...")
+            self.display.clear()
+            self.display.draw_header("Initializing")
+            self.display.draw_text(10, 30, "Loading AI engine...", font=self.display.font_normal)
+            self.display.update()
+            
+            self.ai_engine = AIEngine()
+            
+            # Initialize HID emulator
+            logging.info("Initializing HID emulator...")
+            self.display.draw_text(10, 50, "Loading HID emulator...", font=self.display.font_normal)
+            self.display.update()
+            
+            try:

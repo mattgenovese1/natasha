@@ -1,0 +1,6 @@
+504:    def start_continuous_scan(self, callback=None) -> None:
+639:    def start_evil_twin(self, ssid: str, channel: int = 1, encryption: str = "none") -> bool:
+725:    def start_captive_portal(self, ssid: str, channel: int = 1, portal_type: str = "generic") -> bool:
+960:    def start_handshake_capture(self, ap_bssid: str, channel: int, ssid: str = None) -> bool:
+1028:    def start_pmkid_attack(self, ap_bssid: str, channel: int, ssid: str = None) -> bool:
+1110:    def start_passive_monitor(self, channel: int = None) -> bool:

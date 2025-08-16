@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "name": "Man-in-the-Middle Attack Framework",
+    "description": "Framework for performing various man-in-the-middle attacks",
+    "version": "1.0",
+    "author": "Natasha AI"
+  },
+  "attack_types": [
+    {
+      "name": "arp_spoof",
+      "description": "ARP spoofing attack to intercept traffic between targets",
+      "requirements": ["dsniff", "iptables", "tcpdump"],
+      "parameters": {
+        "target_ip": "IP address of the target",
+        "gateway_ip": "IP address of the gateway"
+      }
+    },
+    {
+      "name": "dns_spoof",
+      "description": "DNS spoofing attack to redirect domains to malicious IPs",
+      "requirements": ["dnsmasq", "iptables", "tcpdump"],
+      "parameters": {
+        "domain": "Domain to spoof",
+        "redirect_ip": "IP address to redirect to"
+      }
+    },
+    {
+      "name": "ssl_strip",
+      "description": "SSL stripping attack to downgrade HTTPS to HTTP",
+      "requirements": ["sslstrip", "iptables", "tcpdump"],
+      "parameters": {
+        "interface": "Network interface to use",
+        "port": "Port to listen on"
+      }
+    },
+    {
+      "name": "captive_portal",
+      "description": "Captive portal attack to capture credentials",
+      "requirements": ["dnsmasq", "hostapd", "apache2", "php"],
+      "parameters": {
+        "ssid": "SSID of the rogue access point",
+        "channel": "WiFi channel to use",
+        "interface": "Network interface to use"
+      }
+    },
+    {
+      "name": "packet_capture",
+      "description": "Capture and analyze network traffic",
+      "requirements": ["tcpdump", "wireshark", "tshark"],
+      "parameters": {
+        "interface": "Network interface to use",
+        "filter": "BPF filter expression",
+        "duration": "Duration of capture in seconds"
+      }
+    },
+    {
+      "name": "session_hijack",
+      "description": "Hijack user sessions by capturing cookies",
+      "requirements": ["ettercap", "tcpdump", "wireshark"],
+      "parameters": {
+        "target_ip": "IP address of the target",
+        "interface": "Network interface to use"
+      }
+    }
+  ],
+  "filters": [
+    {
+      "name": "http_traffic",
+      "description": "Filter for HTTP traffic",
+      "filter_expression": "tcp port 80"
+    },
+    {
+      "name": "https_traffic",
+      "description": "Filter for HTTPS traffic",
+      "filter_expression": "tcp port 443"
+    },
+    {
+      "name": "dns_traffic",
+      "description": "Filter for DNS traffic",
+      "filter_expression": "udp port 53"
+    },
+    {
+      "name": "email_traffic",
+      "description": "Filter for email traffic",
+      "filter_expression": "tcp port 25 or tcp port 110 or tcp port 143 or tcp port 465 or tcp port 587 or tcp port 993 or tcp port 995"
+    },
+    {
+      "name": "ftp_traffic",
+      "description": "Filter for FTP traffic",
+      "filter_expression": "tcp port 20 or tcp port 21"
+    },
+    {
+      "name": "ssh_traffic",
+      "description": "Filter for SSH traffic",
+      "filter_expression": "tcp port 22"
+    },
+    {
+      "name": "telnet_traffic",
+      "description": "Filter for Telnet traffic",
+      "filter_expression": "tcp port 23"
+    }
+  ],
+  "payloads": [
+    {
+      "name": "credential_capture",
+      "description": "Capture login credentials from HTTP traffic",
+      "script": "credential_capture.js"
+    },
+    {
+      "name": "cookie_capture",
+      "description": "Capture cookies from HTTP traffic",
+      "script": "cookie_capture.js"
+    },
+    {
+      "name": "image_replace",
+      "description": "Replace images in HTTP traffic",
+      "script": "image_replace.js"
+    },
+    {
+      "name": "javascript_inject",
+      "description": "Inject JavaScript into HTTP traffic",
+      "script": "javascript_inject.js"
+    },
+    {
+      "name": "download_replace",
+      "description": "Replace downloaded files with malicious ones",
+      "script": "download_replace.js"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+            # Initialize WiFi attack module
+            logging.info("Initializing WiFi attack module...")
+            self.display.draw_text(10, 70, "Loading WiFi module...", font=self.display.font_normal)
+            self.display.update()
+            
+            try:
+                self.wifi_attack = WiFiAttack()
+            except Exception as e:
+                logging.warning(f"WiFi attack module initialization failed: {e}")
+                self.wifi_attack = None
+            
+            # Initialize GPIO for buttons and LEDs
+            logging.info("Initializing GPIO...")
+            self.display.draw_text(10, 90, "Setting up controls...", font=self.display.font_normal)
+            self.display.update()
+            
+            self._init_gpio()
+            
+            logging.info("All components initialized")
+        except Exception as e:
+            logging.error(f"Error initializing components: {e}")

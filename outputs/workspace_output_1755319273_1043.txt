@@ -1,0 +1,37 @@
+    def __init__(self):
+        """Initialize the display interface."""
+        self.epd = None
+        self.image = None
+        self.draw = None
+        self.font_small = None
+        self.font_normal = None
+        self.font_large = None
+        self.lock = threading.Lock()
+        self.last_full_refresh = 0
+        self.refresh_count = 0
+        
+        # Initialize the display
+        self._init_display()
+        
+    def _init_display(self):
+        """Initialize the e-paper display and load resources."""
+        try:
+            # Initialize the e-paper driver
+            self.epd = epd_driver.EPD()
+            self.epd.init()
+            
+            # Clear the display with a white background
+            self.epd.Clear(0xFF)
+            
+            # Create a new image with white background
+            self.image = Image.new('1', (self.WIDTH, self.HEIGHT), 255)
+            self.draw = ImageDraw.Draw(self.image)
+            
+            # Load fonts
+            font_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'fonts')
+            self.font_small = ImageFont.truetype(os.path.join(font_dir, 'DejaVuSansMono.ttf'), 8)
+            self.font_normal = ImageFont.truetype(os.path.join(font_dir, 'DejaVuSansMono.ttf'), 12)
+            self.font_large = ImageFont.truetype(os.path.join(font_dir, 'DejaVuSansMono.ttf'), 16)
+            
+            logging.info("E-paper display initialized successfully")
+        except Exception as e:

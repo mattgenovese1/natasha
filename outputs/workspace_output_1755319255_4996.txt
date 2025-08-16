@@ -1,0 +1,41 @@
+            self._show_main_menu()
+        elif self.state == AppState.USB_ATTACK_MENU:
+            self._show_usb_attack_menu()
+        elif self.state == AppState.WIFI_ATTACK_MENU:
+            self._show_wifi_attack_menu()
+        elif self.state == AppState.USB_ATTACK_CONFIG:
+            self._show_usb_attack_config()
+        elif self.state == AppState.WIFI_ATTACK_CONFIG:
+            self._show_wifi_attack_config()
+        elif self.state == AppState.USB_ATTACK_RUNNING:
+            self._show_usb_attack_running()
+        elif self.state == AppState.WIFI_ATTACK_RUNNING:
+            self._show_wifi_attack_running()
+        elif self.state == AppState.SYSTEM_STATUS:
+            self._show_system_status()
+        elif self.state == AppState.SETTINGS:
+            self._show_settings()
+        elif self.state == AppState.SHUTDOWN:
+            self._show_shutdown()
+    
+    def _show_main_menu(self):
+        """Show the main menu."""
+        self.menu_items = [
+            "USB Attacks",
+            "WiFi Attacks",
+            "System Status",
+            "Settings",
+            "Shutdown"
+        ]
+        
+        self.display.clear()
+        self.display.draw_menu("Natasha Main Menu", self.menu_items, 
+                             selected_index=self.menu_index, 
+                             start_index=self.menu_start)
+        self.display.draw_natasha_avatar(200, 30, expression="normal")
+        self.display.update()
+    
+    def _show_usb_attack_menu(self):
+        """Show the USB attack menu."""
+        self.menu_items = [
+            "Credential Harvester",

@@ -1,0 +1,3 @@
+templates/windows/credential_harvest.json
+templates/macos/credential_harvest.json
+templates/linux/credential_harvest.json

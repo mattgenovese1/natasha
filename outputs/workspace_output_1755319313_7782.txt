@@ -1,0 +1,18 @@
+    def generate_duckyscript(self, 
+                           attack_type: AttackType, 
+                           target_os: TargetOS = TargetOS.UNKNOWN, 
+                           parameters: Dict[str, Any] = None) -> str:
+        """Generate a DuckyScript payload for the specified attack type and target OS.
+        
+        Args:
+            attack_type: Type of attack to generate
+            target_os: Target operating system
+            parameters: Additional parameters for script generation
+            
+        Returns:
+            Generated DuckyScript as a string
+        """
+        if parameters is None:
+            parameters = {}
+        
+        with self.lock:

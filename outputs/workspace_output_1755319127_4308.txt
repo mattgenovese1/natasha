@@ -1,0 +1,19 @@
+total 256
+drwxr-xr-x 4 root root  4096 Aug 16 04:38 .
+drwxr-xr-x 1 root root   101 Aug 16 04:15 ..
+-rw-r--r-- 1 root root 10505 Aug 16 04:33 README.md
+-rw-r--r-- 1 root root  4491 Aug 16 04:19 ai_component_design.md
+-rw-r--r-- 1 root root 29832 Aug 16 04:25 ai_engine.py
+-rw-r--r-- 1 root root 11703 Aug 16 04:21 attack_modules_design.md
+-rw-r--r-- 1 root root 20205 Aug 16 04:23 display_interface.py
+-rw-r--r-- 1 root root  7197 Aug 16 04:20 hardware_design.md
+-rw-r--r-- 1 root root 19799 Aug 16 04:26 hid_emulation.py
+-rw-r--r-- 1 root root  9209 Aug 16 04:34 install.sh
+-rw-r--r-- 1 root root 44916 Aug 16 04:32 main.py
+drwxr-xr-x 2 root root    94 Aug 16 04:38 outputs
+-rw-r--r-- 1 root root 11278 Aug 16 04:22 raspberry_pi_setup.md
+-rw-r--r-- 1 root root  3602 Aug 16 04:18 system_architecture.md
+drwxr-xr-x 5 root root    68 Aug 16 04:37 templates
+-rw-r--r-- 1 root root  2286 Aug 16 04:18 todo.md
+-rw-r--r-- 1 root root  5576 Aug 16 04:19 ui_design.md
+-rw-r--r-- 1 root root 56639 Aug 16 04:29 wifi_attack.py

@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Natasha AI Penetration Testing Tool
+AI Engine for DuckyScript Generation
+
+This module implements the AI engine responsible for generating DuckyScript payloads
+based on target OS detection and attack parameters. It uses a lightweight model
+to generate effective attack scripts tailored to different environments.
+"""
+
+import os
+import time
+import json
+import random
+import logging
+import threading
+from enum import Enum
+import numpy as np
+from typing import Dict, List, Tuple, Optional, Union, Any
+
+# Optional imports for machine learning components
+try:
+    import joblib
+    from sklearn.feature_extraction.text import CountVectorizer
+    ML_AVAILABLE = True
+except ImportError:
+    logging.warning("Machine learning libraries not available. Some features will be limited.")
+    ML_AVAILABLE = False
+
+class TargetOS(Enum):
+    """Enumeration of target operating systems."""
+    WINDOWS = "windows"
+    MACOS = "macos"
+    LINUX = "linux"
+    ANDROID = "android"
+    UNKNOWN = "unknown"
+
+class AttackType(Enum):
+    """Enumeration of attack types."""
+    CREDENTIAL_HARVEST = "credential_harvest"
+    KEYLOGGER = "keylogger"
+    BACKDOOR = "backdoor"
+    RECON = "recon"
+    EXFILTRATION = "exfiltration"
+    NETWORK_CONFIG = "network_config"
+    CUSTOM = "custom"
+
+class AIEngine:

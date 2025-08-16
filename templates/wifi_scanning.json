@@ -1,0 +1,117 @@
+{
+  "metadata": {
+    "name": "WiFi Network Scanning and Analysis",
+    "description": "Advanced WiFi network scanning and analysis capabilities",
+    "version": "1.0",
+    "author": "Natasha AI"
+  },
+  "scan_types": [
+    {
+      "name": "basic_scan",
+      "description": "Basic scan for nearby networks",
+      "command": "iw dev {interface} scan",
+      "parser": "iw_scan_parser"
+    },
+    {
+      "name": "airodump_scan",
+      "description": "Comprehensive scan using airodump-ng",
+      "command": "airodump-ng {interface} --output-format csv -w {output_file} --write-interval 1",
+      "parser": "airodump_parser"
+    },
+    {
+      "name": "kismet_scan",
+      "description": "Advanced scan using Kismet",
+      "command": "kismet -c {interface} --no-ncurses --log-types=csv --log-prefix={output_file}",
+      "parser": "kismet_parser"
+    },
+    {
+      "name": "hidden_ssid_scan",
+      "description": "Scan specifically for hidden SSIDs",
+      "command": "airodump-ng {interface} --output-format csv -w {output_file} --write-interval 1 --encrypt OPN",
+      "parser": "hidden_ssid_parser"
+    },
+    {
+      "name": "client_scan",
+      "description": "Scan for connected clients on a specific network",
+      "command": "airodump-ng {interface} --output-format csv -w {output_file} --write-interval 1 --bssid {bssid} --channel {channel}",
+      "parser": "client_parser"
+    },
+    {
+      "name": "channel_usage_scan",
+      "description": "Analyze channel usage and interference",
+      "command": "horst -i {interface} -o {output_file} -N",
+      "parser": "channel_usage_parser"
+    },
+    {
+      "name": "wps_scan",
+      "description": "Scan for networks with WPS enabled",
+      "command": "wash -i {interface} -o {output_file}",
+      "parser": "wps_parser"
+    }
+  ],
+  "analysis_modules": [
+    {
+      "name": "signal_strength_analyzer",
+      "description": "Analyzes signal strength over time",
+      "parameters": {
+        "min_samples": 10,
+        "time_window": 60
+      }
+    },
+    {
+      "name": "encryption_analyzer",
+      "description": "Analyzes encryption types and security vulnerabilities",
+      "parameters": {
+        "check_wep": true,
+        "check_wps": true,
+        "check_pmkid": true
+      }
+    },
+    {
+      "name": "client_analyzer",
+      "description": "Analyzes client behavior and connection patterns",
+      "parameters": {
+        "track_reconnects": true,
+        "identify_devices": true
+      }
+    },
+    {
+      "name": "channel_analyzer",
+      "description": "Analyzes channel usage and recommends optimal channels",
+      "parameters": {
+        "consider_non_wifi": true,
+        "region": "auto"
+      }
+    },
+    {
+      "name": "network_mapper",
+      "description": "Maps network topology and relationships",
+      "parameters": {
+        "include_clients": true,
+        "include_signal": true
+      }
+    }
+  ],
+  "visualization_types": [
+    {
+      "name": "signal_heatmap",
+      "description": "Generates a heatmap of signal strengths"
+    },
+    {
+      "name": "channel_usage_chart",
+      "description": "Visualizes channel usage and overlap"
+    },
+    {
+      "name": "network_topology_graph",
+      "description": "Visualizes network relationships and connections"
+    },
+    {
+      "name": "encryption_distribution_chart",
+      "description": "Shows distribution of encryption types"
+    },
+    {
+      "name": "signal_strength_time_series",
+      "description": "Plots signal strength over time"
+    }
+  ]
+}

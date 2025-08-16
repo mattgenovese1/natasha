@@ -1,0 +1,1 @@
+321:    def scan_networks(self, duration: int = 30) -> Dict[str, AccessPoint]:

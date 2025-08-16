@@ -1,0 +1,48 @@
+    def __init__(self, model_dir: str = "models"):
+        """Initialize the AI Engine.
+        
+        Args:
+            model_dir: Directory containing model files
+        """
+        self.model_dir = model_dir
+        self.templates = {}
+        self.models = {}
+        self.vectorizers = {}
+        self.lock = threading.Lock()
+        self.os_detection_rules = {}
+        
+        # Load resources
+        self._load_resources()
+    
+    def _load_resources(self):
+        """Load templates, models, and other resources."""
+        try:
+            # Ensure model directory exists
+            os.makedirs(self.model_dir, exist_ok=True)
+            
+            # Load templates
+            template_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'templates')
+            self._load_templates(template_path)
+            
+            # Load OS detection rules
+            self._load_os_detection_rules()
+            
+            # Load ML models if available
+            if ML_AVAILABLE:
+                self._load_ml_models()
+            
+            logging.info("AI Engine resources loaded successfully")
+        except Exception as e:
+            logging.error(f"Failed to load AI Engine resources: {e}")
+    
+    def _load_templates(self, template_path: str):
+        """Load DuckyScript templates from the template directory.
+        
+        Args:
+            template_path: Path to the templates directory
+        """
+        try:
+            # Load templates for each OS and attack type
+            for os_type in TargetOS:
+                self.templates[os_type.value] = {}
+                

@@ -1,0 +1,4 @@
+29:    def __init__(self, name: str, mac: str, is_monitor: bool = False):
+45:    def __init__(self, ssid: str, bssid: str, channel: int, encryption: str, signal: int):
+65:    def __init__(self, mac: str, ap_bssid: str, signal: int):
+94:    def __init__(self, interface_name: str = "wlan1"):

@@ -1,0 +1,11 @@
+class AttackType(Enum):
+    """Enumeration of WiFi attack types."""
+    DEAUTH = "deauth"
+    EVIL_TWIN = "evil_twin"
+    CAPTIVE_PORTAL = "captive_portal"
+    HANDSHAKE_CAPTURE = "handshake_capture"
+    PASSIVE_MONITOR = "passive_monitor"
+    PMKID_ATTACK = "pmkid_attack"
+
+class WiFiAttack:
+    """WiFi attack module for Natasha AI Penetration Testing Tool."""

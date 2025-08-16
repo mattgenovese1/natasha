@@ -1,0 +1,35 @@
+class HIDEmulator:
+    """USB HID Emulator for keyboard emulation."""
+    
+    # HID report structure: [modifier, reserved, Key1, Key2, Key3, Key4, Key5, Key6]
+    REPORT_LENGTH = 8
+    
+    def __init__(self, hid_device_path: str = "/dev/hidg0"):
+        """Initialize the HID Emulator.
+        
+        Args:
+            hid_device_path: Path to the USB HID gadget device
+        """
+        self.hid_device_path = hid_device_path
+        self.device = None
+        self.lock = threading.Lock()
+        self.key_state = bytearray(self.REPORT_LENGTH)
+        self.char_to_key = self._build_char_map()
+        self.duckyscript_commands = self._build_duckyscript_commands()
+        
+        # Check if HID device exists
+        self._check_hid_device()
+    
+    def _check_hid_device(self) -> None:
+        """Check if the HID device exists and is accessible."""
+        if not os.path.exists(self.hid_device_path):
+            logging.error(f"HID device not found: {self.hid_device_path}")
+            logging.info("USB HID gadget may not be configured. Run setup_usb_hid.sh first.")
+            raise FileNotFoundError(f"HID device not found: {self.hid_device_path}")
+        
+        try:
+            # Test opening the device
+            with open(self.hid_device_path, 'wb') as f:
+                pass
+            logging.info(f"HID device ready: {self.hid_device_path}")
+        except Exception as e:

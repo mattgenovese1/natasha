@@ -1,0 +1,34 @@
+class WiFiAttack:
+    """WiFi attack module for Natasha AI Penetration Testing Tool."""
+    
+    def __init__(self, interface_name: str = "wlan1"):
+        """Initialize the WiFi attack module.
+        
+        Args:
+            interface_name: Name of the WiFi interface to use
+        """
+        self.interface_name = interface_name
+        self.interface = None
+        self.monitor_interface = None
+        self.access_points = {}  # BSSID -> AccessPoint
+        self.clients = {}  # MAC -> Client
+        self.lock = threading.Lock()
+        self.scan_thread = None
+        self.attack_thread = None
+        self.stop_event = threading.Event()
+        self.attack_status = {}
+        self.capture_dir = os.path.join(os.path.expanduser("~"), "natasha", "captures")
+        
+        # Ensure capture directory exists
+        os.makedirs(self.capture_dir, exist_ok=True)
+        
+        # Initialize the interface
+        self._init_interface()
+    
+    def _init_interface(self) -> None:
+        """Initialize the WiFi interface."""
+        try:
+            # Check if interface exists
+            if not self._interface_exists(self.interface_name):
+                logging.error(f"WiFi interface {self.interface_name} not found")
+                available = self._get_available_interfaces()

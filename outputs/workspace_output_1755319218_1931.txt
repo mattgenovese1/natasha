@@ -1,0 +1,10 @@
+78:        self.button_pins = {
+93:        self.button_states = {pin: False for pin in self.button_pins.keys()}
+94:        self.button_last_press = {pin: 0 for pin in self.button_pins.keys()}
+95:        self.button_debounce_time = 0.2  # seconds
+151:            # Initialize GPIO for buttons and LEDs
+171:        """Initialize GPIO for buttons and LEDs."""
+179:            # Set up button pins as inputs with pull-up resistors
+180:            for pin in self.button_pins.values():
+188:            # Set up button event detection
+189:            for button, pin in self.button_pins.items():

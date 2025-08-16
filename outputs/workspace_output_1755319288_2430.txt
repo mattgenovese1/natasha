@@ -1,0 +1,53 @@
+    def draw_natasha_avatar(self, x, y, expression="normal"):
+        """Draw Natasha's avatar with the specified expression.
+        
+        Args:
+            x, y: Top-left corner coordinates
+            expression: Avatar expression ("normal", "thinking", "success", "warning")
+        """
+        with self.lock:
+            # Draw avatar background
+            self.draw_rectangle(x, y, x+self.AVATAR_SIZE, y+self.AVATAR_SIZE, outline=0, fill=None)
+            
+            # Basic face outline
+            self.draw_rectangle(x+5, y+5, x+self.AVATAR_SIZE-5, y+self.AVATAR_SIZE-5, outline=0, fill=None)
+            
+            # Draw eyes
+            if expression == "normal":
+                # Normal eyes
+                self.draw_rectangle(x+10, y+15, x+15, y+20, outline=0, fill=0)
+                self.draw_rectangle(x+25, y+15, x+30, y+20, outline=0, fill=0)
+            elif expression == "thinking":
+                # Thinking eyes (one raised eyebrow)
+                self.draw_rectangle(x+10, y+17, x+15, y+22, outline=0, fill=0)
+                self.draw_rectangle(x+25, y+13, x+30, y+18, outline=0, fill=0)
+            elif expression == "success":
+                # Happy eyes
+                self.draw_line(x+10, y+15, x+15, y+20, fill=0)
+                self.draw_line(x+10, y+20, x+15, y+15, fill=0)
+                self.draw_line(x+25, y+15, x+30, y+20, fill=0)
+                self.draw_line(x+25, y+20, x+30, y+15, fill=0)
+            elif expression == "warning":
+                # Warning eyes
+                self.draw_rectangle(x+10, y+15, x+15, y+20, outline=0, fill=0)
+                self.draw_rectangle(x+25, y+15, x+30, y+20, outline=0, fill=0)
+                self.draw_line(x+5, y+10, x+15, y+5, fill=0)
+                self.draw_line(x+25, y+5, x+35, y+10, fill=0)
+            
+            # Draw mouth
+            if expression == "normal":
+                self.draw_line(x+15, y+30, x+25, y+30, fill=0)
+            elif expression == "thinking":
+                self.draw_line(x+15, y+30, x+20, y+32, fill=0)
+                self.draw_line(x+20, y+32, x+25, y+30, fill=0)
+            elif expression == "success":
+                self.draw_line(x+15, y+28, x+20, y+32, fill=0)
+                self.draw_line(x+20, y+32, x+25, y+28, fill=0)
+            elif expression == "warning":
+                self.draw_line(x+15, y+32, x+20, y+28, fill=0)
+                self.draw_line(x+20, y+28, x+25, y+32, fill=0)
+            
+            # Draw hair (simple for e-paper display)
+            self.draw_line(x+5, y+5, x+5, y+15, fill=0)
+            self.draw_line(x+35, y+5, x+35, y+15, fill=0)
+            self.draw_line(x+10, y+3, x+30, y+3, fill=0)

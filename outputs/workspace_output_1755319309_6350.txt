@@ -1,0 +1,2 @@
+313:    def generate_duckyscript(self, 
+693:    def generate_custom_script(self, 

@@ -1,0 +1,35 @@
+            self._init_gpio()
+            
+            logging.info("All components initialized")
+        except Exception as e:
+            logging.error(f"Error initializing components: {e}")
+            if self.display:
+                self.display.clear()
+                self.display.draw_header("Error")
+                self.display.draw_text(10, 40, "Initialization failed:", font=self.display.font_normal)
+                self.display.draw_text(10, 60, str(e), font=self.display.font_normal)
+                self.display.update()
+                time.sleep(5)
+            sys.exit(1)
+    
+    def _init_gpio(self):
+        """Initialize GPIO for buttons and LEDs."""
+        try:
+            import RPi.GPIO as GPIO
+            
+            # Set up GPIO
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
+            
+            # Set up button pins as inputs with pull-up resistors
+            for pin in self.button_pins.values():
+                GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            
+            # Set up LED pins as outputs
+            for pin in self.led_pins.values():
+                GPIO.setup(pin, GPIO.OUT)
+                GPIO.output(pin, GPIO.LOW)
+            
+            # Set up button event detection
+            for button, pin in self.button_pins.items():
+                GPIO.add_event_detect(pin, GPIO.FALLING, callback=lambda channel: self._button_callback(button), bouncetime=200)

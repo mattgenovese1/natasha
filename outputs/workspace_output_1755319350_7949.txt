@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Natasha AI Penetration Testing Tool
+WiFi Attack Module
+
+This module implements WiFi attack capabilities similar to the WiFi Pineapple,
+including network scanning, deauthentication attacks, evil twin AP creation,
+and man-in-the-middle attacks.
+"""
+
+import os
+import time
+import signal
+import logging
+import threading
+import subprocess
+import re
+import json
+import random
+import tempfile
+from typing import Dict, List, Tuple, Optional, Union, Any
+from enum import Enum
+
+class WiFiInterface:
+    """Class representing a WiFi interface."""
+    
+    def __init__(self, name: str, mac: str, is_monitor: bool = False):
+        """Initialize a WiFi interface.
+        
+        Args:
+            name: Interface name (e.g., wlan0)
+            mac: MAC address
+            is_monitor: Whether the interface is in monitor mode
+        """
+        self.name = name
+        self.mac = mac
+        self.is_monitor = is_monitor
+        self.original_name = name
+
+class AccessPoint:
+    """Class representing a WiFi access point."""
+    
+    def __init__(self, ssid: str, bssid: str, channel: int, encryption: str, signal: int):
+        """Initialize an access point.
+        
+        Args:
+            ssid: Network name
+            bssid: MAC address of the AP

@@ -1,0 +1,31 @@
+        with self.lock:
+            # Select appropriate template
+            template = self._select_template(attack_type, target_os, parameters)
+            
+            if template is None:
+                logging.warning(f"No template found for {attack_type.value} on {target_os.value}")
+                return self._generate_fallback_script(attack_type, target_os, parameters)
+            
+            # Generate script from template
+            script = self._generate_from_template(template, parameters)
+            
+            # Add metadata and comments
+            script = self._add_metadata(script, attack_type, target_os, parameters)
+            
+            # Optimize script
+            script = self._optimize_script(script)
+            
+            return script
+    
+    def _select_template(self, 
+                        attack_type: AttackType, 
+                        target_os: TargetOS, 
+                        parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Select the most appropriate template for the attack.
+        
+        Args:
+            attack_type: Type of attack
+            target_os: Target operating system
+            parameters: Additional parameters
+            
+        Returns:

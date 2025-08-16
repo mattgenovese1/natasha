@@ -1,0 +1,10 @@
+117:    def draw_text(self, x, y, text, font=None, fill=0):
+133:    def draw_centered_text(self, y, text, font=None, fill=0):
+150:    def draw_rectangle(self, x0, y0, x1, y1, outline=0, fill=None):
+162:    def draw_line(self, x0, y0, x1, y1, fill=0, width=1):
+174:    def draw_image(self, x, y, image_path):
+197:    def draw_header(self, title, battery_level=None, wifi_status=None):
+232:    def draw_footer(self, left_text=None, center_text=None, right_text=None):
+255:    def draw_menu(self, title, items, selected_index=0, start_index=0, max_items=5):
+298:    def draw_natasha_avatar(self, x, y, expression="normal"):
+352:    def draw_progress_bar(self, x, y, width, progress, max_value=100):

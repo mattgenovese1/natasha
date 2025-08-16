@@ -1,0 +1,62 @@
+                GPIO.add_event_detect(pin, GPIO.FALLING, callback=lambda channel: self._button_callback(button), bouncetime=200)
+            
+            # Blink LEDs to indicate successful initialization
+            self._blink_leds()
+            
+            logging.info("GPIO initialized successfully")
+        except ImportError:
+            logging.warning("RPi.GPIO module not available. Running in development mode.")
+            # In development mode, simulate button presses with keyboard input
+            self._setup_keyboard_input()
+        except Exception as e:
+            logging.error(f"Error initializing GPIO: {e}")
+    
+    def _setup_keyboard_input(self):
+        """Set up keyboard input for development mode."""
+        logging.info("Setting up keyboard input for development mode")
+        
+        def keyboard_input():
+            import termios
+            import tty
+            import sys
+--
+                        self._button_callback("up")
+                    elif ch == 's':  # Down
+                        self._button_callback("down")
+                    elif ch == '\r':  # Enter/Select
+                        self._button_callback("select")
+                    elif ch == 'b':  # Back
+                        self._button_callback("back")
+                    elif ch == 'q':  # Power/Quit
+                        self._button_callback("power")
+                    
+                    time.sleep(0.1)
+            except Exception as e:
+                logging.error(f"Error in keyboard input thread: {e}")
+        
+        # Start keyboard input thread
+        keyboard_thread = threading.Thread(target=keyboard_input)
+        keyboard_thread.daemon = True
+        keyboard_thread.start()
+    
+    def _button_callback(self, button):
+        """Handle button press events.
+        
+        Args:
+            button: Button that was pressed
+        """
+        # Debounce
+        current_time = time.time()
+        if current_time - self.button_last_press[button] < self.button_debounce_time:
+            return
+        
+        self.button_last_press[button] = current_time
+        self.button_states[button] = True
+        
+        logging.debug(f"Button pressed: {button}")
+        
+        # Handle button press based on current state
+        if button == "power":
+            # Power button is special - long press to shutdown
+            self._handle_power_button()
+        elif self.state == AppState.MAIN_MENU:

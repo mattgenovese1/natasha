@@ -1,0 +1,2 @@
+385:    def execute_command(self, command: str) -> None:
+460:    def execute_script(self, script: str, jitter: bool = False, jitter_max: int = 20) -> None:
