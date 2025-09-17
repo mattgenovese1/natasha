@@ -1,0 +1,373 @@
+self._update_display()
+    
+def _handle_main_menu_button(self, button):
+        """Handle button press in main menu.
+        
+        Args:
+            button: Button that was pressed
+        """
+        if button == "up":
+            if self.menu_index > 0:
+                self.menu_index -= 1
+                if self.menu_index < self.menu_start:
+                    self.menu_start = self.menu_index
+        elif button == "down":
+            if self.menu_index < len(self.menu_items) - 1:
+                self.menu_index += 1
+                if self.menu_index >= self.menu_start + 5:  # 5 items visible at once
+                    self.menu_start += 1
+        elif button == "select":
+            selected_item = self.menu_items[self.menu_index]
+            if selected_item == "USB Attacks":
+                self.state = AppState.USB_ATTACK_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            elif selected_item == "WiFi Attacks":
+                self.state = AppState.WIFI_ATTACK_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            elif selected_item == "System Status":
+                self.state = AppState.SYSTEM_STATUS
+            elif selected_item == "Settings":
+                                - -
+self._update_display()
+    
+def _handle_usb_attack_menu_button(self, button):
+        """Handle button press in USB attack menu.
+        
+        Args:
+            button: Button that was pressed
+        """
+        if button == "up":
+            if self.menu_index > 0:
+                self.menu_index -= 1
+                if self.menu_index < self.menu_start:
+                    self.menu_start = self.menu_index
+        elif button == "down":
+            if self.menu_index < len(self.menu_items) - 1:
+                self.menu_index += 1
+                if self.menu_index >= self.menu_start + 5:
+                    self.menu_start += 1
+        elif button == "select":
+            selected_item = self.menu_items[self.menu_index]
+            if selected_item == "Back":
+                self.state = AppState.MAIN_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            else:
+                # Configure selected USB attack
+                self.config_params = {"attack_name": selected_item}
+                self.state = AppState.USB_ATTACK_CONFIG
+                self.menu_index = 0
+                self.menu_start = 0
+        elif button == "back":
+           - -
+self._update_display()
+    
+def _handle_wifi_attack_menu_button(self, button):
+        """Handle button press in WiFi attack menu.
+        
+        Args:
+            button: Button that was pressed
+        """
+        if button == "up":
+            if self.menu_index > 0:
+                self.menu_index -= 1
+                if self.menu_index < self.menu_start:
+                    self.menu_start = self.menu_index
+        elif button == "down":
+            if self.menu_index < len(self.menu_items) - 1:
+                self.menu_index += 1
+                if self.menu_index >= self.menu_start + 5:
+                    self.menu_start += 1
+        elif button == "select":
+            selected_item = self.menu_items[self.menu_index]
+            if selected_item == "Back":
+                self.state = AppState.MAIN_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            else:
+                # Configure selected WiFi attack
+                self.config_params = {"attack_name": selected_item}
+                self.state = AppState.WIFI_ATTACK_CONFIG
+                self.menu_index = 0
+                self.menu_start = 0
+        elif button == "back":
+            - - 
+self._update_display()
+    
+def _handle_usb_attack_config_button(self, button):
+        """Handle button press in USB attack configuration.
+        
+        Args:
+            button: Button that was pressed
+        """
+        # This is a simplified implementation
+        # In a real implementation, this would handle configuration parameters
+        if button == "select":
+            # Start the attack
+            self.state = AppState.USB_ATTACK_RUNNING
+            self._start_usb_attack()
+        elif button == "back":
+            self.state = AppState.USB_ATTACK_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+        
+        self._update_display()
+    
+def _handle_wifi_attack_config_button(self, button):
+        """Handle button press in WiFi attack configuration.
+        
+        Args:
+            button: Button that was pressed
+        """
+        # This is a simplified implementation
+        # In a real implementation, this would handle configuration parameters
+        if button == "select":
+            # Start the attack
+            self.state = AppState.WIFI_ATTACK_RUNNING
+            self._start_wifi_attack()
+        elif button == "back":
+            self.state = AppState.WIFI_ATTACK_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+        
+        self._update_display()
+    
+def _handle_usb_attack_running_button(self, button):
+        """Handle button press while USB attack is running.
+        
+        Args:
+            button: Button that was pressed
+        """
+        if button == "back" or button == "select":
+            # Stop the attack
+            self._stop_usb_attack()
+            self.state = AppState.USB_ATTACK_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+            self._update_display()
+    
+def _handle_wifi_attack_running_button(self, button):
+        """Handle button press while WiFi attack is running.
+        
+        Args:
+            button: Button that was pressed
+        """
+        if button == "back" or button == "select":
+            # Stop the attack
+            self._stop_wifi_attack()
+            self.state = AppState.WIFI_ATTACK_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+            self._update_display()
+    
+def _handle_system_status_button(self, button):
+        """Handle button press in system status screen.
+        
+        Args:
+            button: Button that was pressed
+        """
+        if button == "back" or button == "select":
+            self.state = AppState.MAIN_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+            self._update_display()
+    
+def _handle_settings_button(self, button):
+        """Handle button press in settings screen.
+        
+        Args:
+            button: Button that was pressed
+        """
+        if button == "up":
+            if self.menu_index > 0:
+                self.menu_index -= 1
+                if self.menu_index < self.menu_start:
+                    self.menu_start = self.menu_index
+        elif button == "down":
+            if self.menu_index < len(self.menu_items) - 1:
+                self.menu_index += 1
+                if self.menu_index >= self.menu_start + 5:
+                    self.menu_start += 1
+        elif button == "select":
+            selected_item = self.menu_items[self.menu_index]
+            if selected_item == "Back":
+                self.state = AppState.MAIN_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            else:
+                # Handle settings item
+                pass
+        elif button == "back":
+            self.state = AppState.MAIN_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+            - -
+self._update_display()
+    
+def _blink_leds(self):
+        """Blink LEDs to indicate successful initialization."""
+        try:
+            import RPi.GPIO as GPIO
+            
+            # Blink red LED
+            GPIO.output(self.led_pins["red"], GPIO.HIGH)
+            time.sleep(0.2)
+            GPIO.output(self.led_pins["red"], GPIO.LOW)
+            
+            # Blink green LED
+            GPIO.output(self.led_pins["green"], GPIO.HIGH)
+            time.sleep(0.2)
+            GPIO.output(self.led_pins["green"], GPIO.LOW)
+        except:
+            pass
+    
+def _set_led(self, led, state):
+        """Set LED state.
+        
+        Args:
+            led: LED to set ("red" or "green")
+            state: LED state (True for on, False for off)
+        """
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.output(self.led_pins[led], GPIO.HIGH if state else GPIO.LOW)
+        except:
+            pass
+--
+def _update_display(self):
+        """Update the display based on the current state."""
+        if self.state == AppState.MAIN_MENU:
+            self._show_main_menu()
+        elif self.state == AppState.USB_ATTACK_MENU:
+            self._show_usb_attack_menu()
+        elif self.state == AppState.WIFI_ATTACK_MENU:
+            self._show_wifi_attack_menu()
+        elif self.state == AppState.USB_ATTACK_CONFIG:
+            self._show_usb_attack_config()
+        elif self.state == AppState.WIFI_ATTACK_CONFIG:
+            self._show_wifi_attack_config()
+        elif self.state == AppState.USB_ATTACK_RUNNING:
+            self._show_usb_attack_running()
+        elif self.state == AppState.WIFI_ATTACK_RUNNING:
+            self._show_wifi_attack_running()
+        elif self.state == AppState.SYSTEM_STATUS:
+            self._show_system_status()
+        elif self.state == AppState.SETTINGS:
+            self._show_settings()
+        elif self.state == AppState.SHUTDOWN:
+            self._show_shutdown()
+    
+    def _show_main_menu(self):
+        """Show the main menu."""
+        self.menu_items = [
+            "USB Attacks",
+            "WiFi Attacks",
+            "System Status",
+            "Settings",
+            "Shutdown"
+--
+            self._update_display()
+        except Exception as e:
+            logging.error(f"Error running USB attack: {e}")
+            self.attack_results["error"] = str(e)
+            
+            # Return to menu
+            self.state = AppState.USB_ATTACK_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+            self._update_display()
+        finally:
+            # Turn off red LED
+            self._set_led("red", False)
+    
+    def _stop_usb_attack(self):
+        """Stop the running USB attack."""
+        logging.info("Stopping USB attack")
+        
+        # Turn off red LED
+        self._set_led("red", False)
+    
+    def _start_wifi_attack(self):
+        """Start the configured WiFi attack."""
+        attack_name = self.config_params.get("attack_name", "Unknown")
+        logging.info(f"Starting WiFi attack: {attack_name}")
+        
+        # Set red LED to indicate attack is running
+        self._set_led("red", True)
+        
+        # Reset attack results
+        self.attack_results = {}
+        
+        # Start attack in a separate thread
+        attack_thread = threading.Thread(target=self._run_wifi_attack)
+        attack_thread.daemon = True
+        attack_thread.start()
+    
+    def _run_wifi_attack(self):
+        """Run the WiFi attack in a background thread."""
+        attack_name = self.config_params.get("attack_name", "Unknown")
+--
+            self._update_display()
+        finally:
+            # Turn off red LED
+            self._set_led("red", False)
+    
+    def _stop_wifi_attack(self):
+        """Stop the running WiFi attack."""
+        logging.info("Stopping WiFi attack")
+        
+        if self.wifi_attack:
+            self.wifi_attack.stop_attack()
+            self.wifi_attack.stop_continuous_scan()
+        
+        # Turn off red LED
+        self._set_led("red", False)
+    
+    def _signal_handler(self, sig, frame):
+        """Handle signals (e.g., SIGINT, SIGTERM).
+        
+        Args:
+            sig: Signal number
+            frame: Current stack frame
+        """
+        logging.info(f"Received signal {sig}, shutting down")
+        self._cleanup()
+        sys.exit(0)
+    
+    def _cleanup(self):
+        """Clean up resources before exiting."""
+        logging.info("Cleaning up resources")
+        
+--
+        self._update_display()
+        
+        # Set green LED to indicate ready
+        self._set_led("green", True)
+        
+        # Main loop
+        try:
+            while True:
+                # Process events
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            logging.info("Keyboard interrupt received, shutting down")
+            self._cleanup()
+            sys.exit(0)
+
+
+if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Natasha AI Penetration Testing Tool")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+    
+    # Configure logging level
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Create and run the application
+    app = NatashaApp()
+    app.run();
+    

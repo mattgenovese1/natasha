@@ -14,10 +14,10 @@ import sys
 import time
 import signal
 import logging
+from logging.handlers import RotatingFileHandler
 import threading
 import argparse
-import json
-from typing import Dict, List, Tuple, Optional, Union, Any
+import re
 from enum import Enum
 
 # Import component modules
@@ -25,19 +25,22 @@ try:
     from display_interface import DisplayInterface
     from ai_engine import AIEngine, TargetOS, AttackType as AIAttackType
     from hid_emulation import HIDEmulator
-    from wifi_attack import WiFiAttack, AttackType as WiFiAttackType
-    from mitm_attack import MITMAttack, MITMAttackType
+    from wifi_attack import WiFiAttack
+    from mitm_attack import MITMAttack
 except ImportError as e:
     print(f"Error importing modules: {e}")
     print("Make sure all required modules are in the same directory or in the Python path.")
     sys.exit(1)
 
 # Configure logging
+LOG_DIR = os.path.join(os.path.expanduser("~"), "natasha", "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(os.path.expanduser("~"), "natasha", "logs", "natasha.log")),
+        RotatingFileHandler(os.path.join(LOG_DIR, "natasha.log"), maxBytes=1_000_000, backupCount=5),
         logging.StreamHandler()
     ]
 )
@@ -55,9 +58,6 @@ class AppState(Enum):
     USB_ATTACK_RUNNING = "usb_attack_running"
     WIFI_ATTACK_RUNNING = "wifi_attack_running"
     MITM_ATTACK_RUNNING = "mitm_attack_running"
-    WIFI_ATTACK_CONFIG = "wifi_attack_config"
-    USB_ATTACK_RUNNING = "usb_attack_running"
-    WIFI_ATTACK_RUNNING = "wifi_attack_running"
     SYSTEM_STATUS = "system_status"
     SETTINGS = "settings"
     SHUTDOWN = "shutdown"
@@ -81,6 +81,14 @@ class NatashaApp:
         self.config_params = {}
         self.attack_results = {}
         self.stop_event = threading.Event()
+        self.display_lock = threading.RLock()
+        self.state_lock = threading.RLock()
+        
+        # Base directories
+        self.base_dir = os.path.join(os.path.expanduser("~"), "natasha")
+        self.logs_dir = os.path.join(self.base_dir, "logs")
+        self.scripts_dir = os.path.join(self.base_dir, "scripts")
+        self.captures_dir = os.path.join(self.base_dir, "captures")
         
         # Button GPIO pins
         self.button_pins = {
@@ -113,9 +121,9 @@ class NatashaApp:
         """Initialize all components."""
         try:
             # Create directories
-            os.makedirs(os.path.join(os.path.expanduser("~"), "natasha", "logs"), exist_ok=True)
-            os.makedirs(os.path.join(os.path.expanduser("~"), "natasha", "scripts"), exist_ok=True)
-            os.makedirs(os.path.join(os.path.expanduser("~"), "natasha", "captures"), exist_ok=True)
+            os.makedirs(self.logs_dir, exist_ok=True)
+            os.makedirs(self.scripts_dir, exist_ok=True)
+            os.makedirs(self.captures_dir, exist_ok=True)
             
             # Initialize display
             logging.info("Initializing display...")
@@ -206,7 +214,8 @@ class NatashaApp:
             
             # Set up button event detection
             for button, pin in self.button_pins.items():
-                GPIO.add_event_detect(pin, GPIO.FALLING, callback=lambda channel: self._button_callback(button), bouncetime=200)
+                # Rely on software debounce in _button_callback; no hardware bouncetime
+                GPIO.add_event_detect(pin, GPIO.FALLING, callback=lambda channel, b=button: self._button_callback(b))
             
             # Blink LEDs to indicate successful initialization
             self._blink_leds()
@@ -227,32 +236,30 @@ class NatashaApp:
             import termios
             import tty
             import sys
+            import select
             
             fd = sys.stdin.fileno()
             old_settings = termios.tcgetattr(fd)
-            
             try:
+                tty.setcbreak(fd)
                 while not self.stop_event.is_set():
-                    try:
-                        tty.setraw(fd)
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+                    if rlist:
                         ch = sys.stdin.read(1)
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                    
-                    if ch == 'w':  # Up
-                        self._button_callback("up")
-                    elif ch == 's':  # Down
-                        self._button_callback("down")
-                    elif ch == '\r':  # Enter/Select
-                        self._button_callback("select")
-                    elif ch == 'b':  # Back
-                        self._button_callback("back")
-                    elif ch == 'q':  # Power/Quit
-                        self._button_callback("power")
-                    
-                    time.sleep(0.1)
+                        if ch == 'w':  # Up
+                            self._button_callback("up")
+                        elif ch == 's':  # Down
+                            self._button_callback("down")
+                        elif ch in ('\r', '\n'):  # Enter/Select
+                            self._button_callback("select")
+                        elif ch == 'b':  # Back
+                            self._button_callback("back")
+                        elif ch == 'q':  # Power/Quit
+                            self._button_callback("power")
             except Exception as e:
                 logging.error(f"Error in keyboard input thread: {e}")
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         
         # Start keyboard input thread
         keyboard_thread = threading.Thread(target=keyboard_input)
@@ -375,7 +382,7 @@ class NatashaApp:
                 self.menu_start = 0
             else:
                 # Configure selected USB attack
-                self.config_params = {"attack_name": selected_item}
+                self.config_params = {"attack_name": selected_item, "target_os_index": 0}
                 self.state = AppState.USB_ATTACK_CONFIG
                 self.menu_index = 0
                 self.menu_start = 0
@@ -427,9 +434,14 @@ class NatashaApp:
         Args:
             button: Button that was pressed
         """
-        # This is a simplified implementation
-        # In a real implementation, this would handle configuration parameters
-        if button == "select":
+        # Basic parameter navigation for Target OS selection
+        if button == "up":
+            idx = self.config_params.get("target_os_index", 0)
+            self.config_params["target_os_index"] = (idx - 1) % 5
+        elif button == "down":
+            idx = self.config_params.get("target_os_index", 0)
+            self.config_params["target_os_index"] = (idx + 1) % 5
+        elif button == "select":
             # Start the attack
             self.state = AppState.USB_ATTACK_RUNNING
             self._start_usb_attack()
@@ -545,8 +557,10 @@ class NatashaApp:
             GPIO.output(self.led_pins["green"], GPIO.HIGH)
             time.sleep(0.2)
             GPIO.output(self.led_pins["green"], GPIO.LOW)
-        except:
-            pass
+        except ImportError:
+            logging.debug("RPi.GPIO not available; skipping LED blink in dev mode.")
+        except Exception as e:
+            logging.warning(f"Blink LEDs failed: {e}")
     
     def _set_led(self, led, state):
         """Set LED state.
@@ -558,9 +572,16 @@ class NatashaApp:
         try:
             import RPi.GPIO as GPIO
             GPIO.output(self.led_pins[led], GPIO.HIGH if state else GPIO.LOW)
-        except:
-            pass
+        except ImportError:
+            logging.debug("RPi.GPIO not available; LED control disabled in dev mode.")
+        except Exception as e:
+            logging.warning(f"LED control failed: {e}")
     
+    def _update_display_threadsafe(self):
+        """Update the display while holding the display lock (thread-safe)."""
+        with self.display_lock:
+            self._update_display()
+
     def _update_display(self):
         """Update the display based on the current state."""
         if self.state == AppState.MAIN_MENU:
@@ -651,14 +672,19 @@ class NatashaApp:
         self.display.draw_header(f"Configure: {attack_name}")
         self.display.draw_natasha_avatar(200, 30, expression="thinking")
         
+        # Target OS selection (UP/DOWN to change)
+        target_os_options = ["Auto-detect", "Windows", "macOS", "Linux", "Android"]
+        idx = self.config_params.get("target_os_index", 0)
+        selected_os = target_os_options[idx % len(target_os_options)]
+        
         self.display.draw_text(10, 30, "Target OS:", font=self.display.font_normal)
-        self.display.draw_text(100, 30, "Auto-detect", font=self.display.font_normal)
+        self.display.draw_text(100, 30, selected_os, font=self.display.font_normal)
         
         self.display.draw_text(10, 50, "Options:", font=self.display.font_normal)
         self.display.draw_text(100, 50, "Default", font=self.display.font_normal)
         
-        self.display.draw_text(10, 80, "Press SELECT to start attack", font=self.display.font_normal)
-        self.display.draw_text(10, 100, "Press BACK to return", font=self.display.font_normal)
+        self.display.draw_text(10, 80, "UP/DOWN: change OS", font=self.display.font_small)
+        self.display.draw_text(10, 96, "SELECT: start  BACK: return", font=self.display.font_small)
         
         self.display.draw_footer(None, "START", "BACK")
         self.display.update()
@@ -741,16 +767,169 @@ class NatashaApp:
         self.display.draw_footer("STOP", None, None)
         self.display.update()
     
+    def _show_mitm_attack_menu(self):
+        """Show the MITM attack menu."""
+        self.menu_items = [
+            "ARP Spoof",
+            "DNS Spoof",
+            "HTTP Proxy",
+            "Back"
+        ]
+        
+        self.display.clear()
+        self.display.draw_menu("MITM Attacks", self.menu_items, 
+                             selected_index=self.menu_index, 
+                             start_index=self.menu_start)
+        self.display.update()
+
+    def _handle_mitm_attack_menu_button(self, button):
+        """Handle button press in MITM attack menu."""
+        if button == "up":
+            if self.menu_index > 0:
+                self.menu_index -= 1
+                if self.menu_index < self.menu_start:
+                    self.menu_start = self.menu_index
+        elif button == "down":
+            if self.menu_index < len(self.menu_items) - 1:
+                self.menu_index += 1
+                if self.menu_index >= self.menu_start + 5:
+                    self.menu_start += 1
+        elif button == "select":
+            selected_item = self.menu_items[self.menu_index]
+            if selected_item == "Back":
+                self.state = AppState.MAIN_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            else:
+                # Configure selected MITM attack
+                self.config_params = {"attack_name": selected_item}
+                self.state = AppState.MITM_ATTACK_CONFIG
+                self.menu_index = 0
+                self.menu_start = 0
+        elif button == "back":
+            self.state = AppState.MAIN_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+        
+        self._update_display()
+
+    def _show_mitm_attack_config(self):
+        """Show the MITM attack configuration screen."""
+        attack_name = self.config_params.get("attack_name", "Unknown")
+        
+        self.display.clear()
+        self.display.draw_header(f"Configure: {attack_name}")
+        self.display.draw_natasha_avatar(200, 30, expression="thinking")
+        
+        self.display.draw_text(10, 30, "Target:", font=self.display.font_normal)
+        self.display.draw_text(100, 30, "Default", font=self.display.font_normal)
+        
+        self.display.draw_text(10, 80, "Press SELECT to start attack", font=self.display.font_normal)
+        self.display.draw_text(10, 100, "Press BACK to return", font=self.display.font_normal)
+        
+        self.display.draw_footer(None, "START", "BACK")
+        self.display.update()
+
+    def _handle_mitm_attack_config_button(self, button):
+        """Handle button press in MITM attack configuration."""
+        if button == "select":
+            self.state = AppState.MITM_ATTACK_RUNNING
+            self._start_mitm_attack()
+        elif button == "back":
+            self.state = AppState.MITM_ATTACK_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+        
+        self._update_display()
+
+    def _show_mitm_attack_running(self):
+        """Show the MITM attack running screen."""
+        attack_name = self.config_params.get("attack_name", "Unknown")
+        
+        self.display.clear()
+        self.display.draw_header(f"Running: {attack_name}")
+        self.display.draw_natasha_avatar(200, 30, expression="normal")
+        
+        self.display.draw_text(10, 30, "Status:", font=self.display.font_normal)
+        self.display.draw_text(100, 30, "Active", font=self.display.font_normal)
+        
+        self.display.draw_text(10, 50, "Notes:", font=self.display.font_normal)
+        self.display.draw_text(100, 50, "Demo mode", font=self.display.font_normal)
+        
+        self.display.draw_footer("STOP", None, None)
+        self.display.update()
+
+    def _handle_mitm_attack_running_button(self, button):
+        """Handle button press while MITM attack is running."""
+        if button in ("back", "select"):
+            self._stop_mitm_attack()
+            self.state = AppState.MITM_ATTACK_MENU
+            self.menu_index = 0
+            self.menu_start = 0
+            self._update_display()
+
+    def _start_mitm_attack(self):
+        """Start the configured MITM attack (demo stub)."""
+        attack_name = self.config_params.get("attack_name", "Unknown")
+        logging.info(f"Starting MITM attack: {attack_name}")
+        self._set_led("red", True)
+        self.attack_results = {}
+        t = threading.Thread(target=self._run_mitm_attack, daemon=True)
+        t.start()
+
+    def _run_mitm_attack(self):
+        """Run the MITM attack in a background thread (demo stub)."""
+        try:
+            # Demo loop that just updates the screen until stopped
+            counter = 0
+            while True:
+                with self.state_lock:
+                    running = self.state == AppState.MITM_ATTACK_RUNNING
+                if not running:
+                    break
+                self.attack_results["counter"] = counter
+                self._update_display_threadsafe()
+                counter += 1
+                time.sleep(1)
+        except Exception as e:
+            logging.error(f"Error running MITM attack: {e}")
+            self.attack_results["error"] = str(e)
+            with self.state_lock:
+                self.state = AppState.MITM_ATTACK_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            self._update_display_threadsafe()
+        finally:
+            self._set_led("red", False)
+
+    def _stop_mitm_attack(self):
+        """Stop the running MITM attack (demo stub)."""
+        logging.info("Stopping MITM attack")
+        if self.mitm_attack and hasattr(self.mitm_attack, "stop_attack"):
+            try:
+                self.mitm_attack.stop_attack()
+            except Exception as e:
+                logging.debug(f"MITM stop error: {e}")
+        # LED off handled in thread finally
+    
     def _show_system_status(self):
         """Show the system status screen."""
         # Get system information
-        import psutil
+        try:
+            import psutil
+        except ImportError:
+            psutil = None
         
-        cpu_percent = psutil.cpu_percent()
-        memory = psutil.virtual_memory()
-        memory_percent = memory.percent
-        disk = psutil.disk_usage('/')
-        disk_percent = disk.percent
+        if psutil:
+            cpu_percent = psutil.cpu_percent()
+            memory = psutil.virtual_memory()
+            memory_percent = memory.percent
+            disk = psutil.disk_usage('/')
+            disk_percent = disk.percent
+        else:
+            cpu_percent = 0
+            memory_percent = 0
+            disk_percent = 0
         
         battery_level = self._get_battery_level()
         
@@ -829,7 +1008,8 @@ class NatashaApp:
             minutes, seconds = divmod(remainder, 60)
             
             return f"{int(hours)}h {int(minutes)}m"
-        except:
+        except Exception as e:
+            logging.debug(f"Could not read uptime: {e}")
             return "Unknown"
     
     def _start_usb_attack(self):
@@ -858,8 +1038,13 @@ class NatashaApp:
                 self.attack_results = {"error": "HID emulator not available"}
                 return
             
-            # Detect target OS
-            target_os = self.hid_emulator.detect_target_os()
+            # Determine target OS (override or detection)
+            idx = self.config_params.get("target_os_index", 0)
+            if idx == 0:
+                target_os = self.hid_emulator.detect_target_os()
+            else:
+                idx_map = {1: "windows", 2: "macos", 3: "linux", 4: "android"}
+                target_os = idx_map.get(idx, "unknown")
             self.attack_results["target_os"] = target_os
             
             # Map attack name to AI attack type
@@ -888,14 +1073,16 @@ class NatashaApp:
             self.attack_results["progress"] = 10
             logging.info(f"Generating script for {attack_name} on {target_os}")
             
-            script = self.ai_engine.generate_duckyscript(attack_type, ai_target_os)
+            params = self.config_params.get("parameters", {})
+            script = self.ai_engine.generate_duckyscript(attack_type, ai_target_os, params)
             
             # Save script to file
-            script_dir = os.path.join(os.path.expanduser("~"), "natasha", "scripts")
+            script_dir = self.scripts_dir
             os.makedirs(script_dir, exist_ok=True)
             
             timestamp = time.strftime("%Y%m%d-%H%M%S")
-            script_file = os.path.join(script_dir, f"{attack_name.replace(' ', '_')}_{timestamp}.txt")
+            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", attack_name).strip("_")
+            script_file = os.path.join(script_dir, f"{safe_name}_{timestamp}.txt")
             
             with open(script_file, 'w') as f:
                 f.write(script)
@@ -911,7 +1098,9 @@ class NatashaApp:
             total_lines = len(lines)
             
             for i, line in enumerate(lines):
-                if self.state != AppState.USB_ATTACK_RUNNING:
+                with self.state_lock:
+                    running = self.state == AppState.USB_ATTACK_RUNNING
+                if not running:
                     # Attack was stopped
                     break
                 
@@ -926,7 +1115,7 @@ class NatashaApp:
                 self.attack_results["progress"] = progress
                 
                 # Update display
-                self._show_usb_attack_running()
+                self._update_display_threadsafe()
             
             # Attack completed
             self.attack_results["progress"] = 100
@@ -936,19 +1125,21 @@ class NatashaApp:
             time.sleep(2)
             
             # Return to menu
-            self.state = AppState.USB_ATTACK_MENU
-            self.menu_index = 0
-            self.menu_start = 0
-            self._update_display()
+            with self.state_lock:
+                self.state = AppState.USB_ATTACK_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            self._update_display_threadsafe()
         except Exception as e:
             logging.error(f"Error running USB attack: {e}")
             self.attack_results["error"] = str(e)
             
             # Return to menu
-            self.state = AppState.USB_ATTACK_MENU
-            self.menu_index = 0
-            self.menu_start = 0
-            self._update_display()
+            with self.state_lock:
+                self.state = AppState.USB_ATTACK_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            self._update_display_threadsafe()
         finally:
             # Turn off red LED
             self._set_led("red", False)
@@ -956,9 +1147,7 @@ class NatashaApp:
     def _stop_usb_attack(self):
         """Stop the running USB attack."""
         logging.info("Stopping USB attack")
-        
-        # Turn off red LED
-        self._set_led("red", False)
+        # LED state will be turned off by the USB worker thread's finally block
     
     def _start_wifi_attack(self):
         """Start the configured WiFi attack."""
@@ -991,12 +1180,16 @@ class NatashaApp:
                 def scan_callback(results):
                     self.attack_results["networks_found"] = len(results)
                     self.attack_results["clients_found"] = len(self.wifi_attack.clients)
-                    self._show_wifi_attack_running()
+                    self._update_display_threadsafe()
                 
                 self.wifi_attack.start_continuous_scan(callback=scan_callback)
                 
                 # Keep scanning until attack is stopped
-                while self.state == AppState.WIFI_ATTACK_RUNNING:
+                while True:
+                    with self.state_lock:
+                        running = self.state == AppState.WIFI_ATTACK_RUNNING
+                    if not running:
+                        break
                     time.sleep(1)
                 
                 # Stop scanning
@@ -1007,12 +1200,18 @@ class NatashaApp:
                 # For demonstration, just deauthenticate all networks periodically
                 packets_sent = 0
                 
-                while self.state == AppState.WIFI_ATTACK_RUNNING:
+                while True:
+                    with self.state_lock:
+                        running = self.state == AppState.WIFI_ATTACK_RUNNING
+                    if not running:
+                        break
                     # Scan for networks
                     networks = self.wifi_attack.scan_networks(duration=5)
                     
                     for bssid, ap in networks.items():
-                        if self.state != AppState.WIFI_ATTACK_RUNNING:
+                        with self.state_lock:
+                            running = self.state == AppState.WIFI_ATTACK_RUNNING
+                        if not running:
                             break
                         
                         # Deauthenticate network
@@ -1020,7 +1219,7 @@ class NatashaApp:
                         packets_sent += 5
                         
                         self.attack_results["packets_sent"] = packets_sent
-                        self._show_wifi_attack_running()
+                        self._update_display_threadsafe()
                     
                     time.sleep(1)
             
@@ -1030,14 +1229,18 @@ class NatashaApp:
                 self.wifi_attack.start_evil_twin("Free-WiFi", channel=1)
                 
                 # Monitor clients
-                while self.state == AppState.WIFI_ATTACK_RUNNING:
+                while True:
+                    with self.state_lock:
+                        running = self.state == AppState.WIFI_ATTACK_RUNNING
+                    if not running:
+                        break
                     # Get attack status
                     status = self.wifi_attack.get_attack_status()
                     
                     # Update results
                     self.attack_results["clients_connected"] = 0  # In a real implementation, this would be the actual count
                     
-                    self._show_wifi_attack_running()
+                    self._update_display_threadsafe()
                     time.sleep(1)
                 
                 # Stop attack
@@ -1048,7 +1251,11 @@ class NatashaApp:
                 self.wifi_attack.start_captive_portal("Free-WiFi", channel=1)
                 
                 # Monitor clients and credentials
-                while self.state == AppState.WIFI_ATTACK_RUNNING:
+                while True:
+                    with self.state_lock:
+                        running = self.state == AppState.WIFI_ATTACK_RUNNING
+                    if not running:
+                        break
                     # Get attack status
                     status = self.wifi_attack.get_attack_status()
                     
@@ -1056,7 +1263,7 @@ class NatashaApp:
                     self.attack_results["clients_connected"] = 0  # In a real implementation, this would be the actual count
                     self.attack_results["credentials_captured"] = 0  # In a real implementation, this would be the actual count
                     
-                    self._show_wifi_attack_running()
+                    self._update_display_threadsafe()
                     time.sleep(1)
                 
                 # Stop attack
@@ -1068,14 +1275,18 @@ class NatashaApp:
                 self.wifi_attack.start_handshake_capture("00:11:22:33:44:55", 1)
                 
                 # Monitor capture
-                while self.state == AppState.WIFI_ATTACK_RUNNING:
+                while True:
+                    with self.state_lock:
+                        running = self.state == AppState.WIFI_ATTACK_RUNNING
+                    if not running:
+                        break
                     # Get attack status
                     status = self.wifi_attack.get_attack_status()
                     
                     # Update results
                     self.attack_results["capture_status"] = "Waiting for handshake..."
                     
-                    self._show_wifi_attack_running()
+                    self._update_display_threadsafe()
                     time.sleep(1)
                 
                 # Stop attack
@@ -1087,14 +1298,18 @@ class NatashaApp:
                 self.wifi_attack.start_pmkid_attack("00:11:22:33:44:55", 1)
                 
                 # Monitor capture
-                while self.state == AppState.WIFI_ATTACK_RUNNING:
+                while True:
+                    with self.state_lock:
+                        running = self.state == AppState.WIFI_ATTACK_RUNNING
+                    if not running:
+                        break
                     # Get attack status
                     status = self.wifi_attack.get_attack_status()
                     
                     # Update results
                     self.attack_results["capture_status"] = "Waiting for PMKID..."
                     
-                    self._show_wifi_attack_running()
+                    self._update_display_threadsafe()
                     time.sleep(1)
                 
                 # Stop attack
@@ -1105,10 +1320,11 @@ class NatashaApp:
             self.attack_results["error"] = str(e)
             
             # Return to menu
-            self.state = AppState.WIFI_ATTACK_MENU
-            self.menu_index = 0
-            self.menu_start = 0
-            self._update_display()
+            with self.state_lock:
+                self.state = AppState.WIFI_ATTACK_MENU
+                self.menu_index = 0
+                self.menu_start = 0
+            self._update_display_threadsafe()
         finally:
             # Turn off red LED
             self._set_led("red", False)
@@ -1121,8 +1337,7 @@ class NatashaApp:
             self.wifi_attack.stop_attack()
             self.wifi_attack.stop_continuous_scan()
         
-        # Turn off red LED
-        self._set_led("red", False)
+        # LED state will be turned off by the WiFi worker thread's finally block
     
     def _signal_handler(self, sig, frame):
         """Handle signals (e.g., SIGINT, SIGTERM).
@@ -1142,6 +1357,11 @@ class NatashaApp:
         # Stop any running attacks
         if self.wifi_attack:
             self.wifi_attack.cleanup()
+        if self.hid_emulator and hasattr(self.hid_emulator, "cleanup"):
+            try:
+                self.hid_emulator.cleanup()
+            except Exception as e:
+                logging.debug(f"HID cleanup error: {e}")
         
         # Put display to sleep
         if self.display:
@@ -1162,8 +1382,10 @@ class NatashaApp:
         try:
             import RPi.GPIO as GPIO
             GPIO.cleanup()
-        except:
-            pass
+        except ImportError:
+            logging.debug("RPi.GPIO not available; skipping GPIO cleanup.")
+        except Exception as e:
+            logging.warning(f"GPIO cleanup failed: {e}")
     
     def run(self):
         """Run the application main loop."""
@@ -1197,6 +1419,22 @@ if __name__ == "__main__":
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     
+    # Bind external MITM UI handlers if available
+    try:
+        import mitm_attack_methods as mam
+        # Expose AppState enum to the external methods module to avoid NameError
+        mam.AppState = AppState
+        NatashaApp._show_mitm_attack_menu = mam._show_mitm_attack_menu
+        NatashaApp._handle_mitm_attack_menu_button = mam._handle_mitm_attack_menu_button
+        NatashaApp._show_mitm_attack_config = mam._show_mitm_attack_config
+        NatashaApp._handle_mitm_attack_config_button = mam._handle_mitm_attack_config_button
+        NatashaApp._show_mitm_attack_running = mam._show_mitm_attack_running
+        NatashaApp._handle_mitm_attack_running_button = mam._handle_mitm_attack_running_button
+        NatashaApp._start_mitm_attack = mam._start_mitm_attack
+        NatashaApp._stop_mitm_attack = mam._stop_mitm_attack
+    except Exception as e:
+        logging.debug(f"MITM methods binding skipped: {e}")
+
     # Create and run the application
     app = NatashaApp()
     app.run()

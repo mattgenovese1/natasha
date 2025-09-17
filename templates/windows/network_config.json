@@ -1,0 +1,9 @@
+{
+  "metadata": {
+    "name": "Network Config for Windows",
+    "description": "Template for network config attacks on windows",
+    "version": "1.0",
+    "author": "Natasha AI"
+  },
+  "templates": []
+}

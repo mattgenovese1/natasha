@@ -1,0 +1,9 @@
+{
+  "metadata": {
+    "name": "Exfiltration for Android",
+    "description": "Template for exfiltration attacks on android",
+    "version": "1.0",
+    "author": "Natasha AI"
+  },
+  "templates": []
+}

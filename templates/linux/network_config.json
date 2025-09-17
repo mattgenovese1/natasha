@@ -1,0 +1,9 @@
+{
+  "metadata": {
+    "name": "Network Config for Linux",
+    "description": "Template for network config attacks on linux",
+    "version": "1.0",
+    "author": "Natasha AI"
+  },
+  "templates": []
+}

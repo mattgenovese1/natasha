@@ -1,0 +1,9 @@
+{
+  "metadata": {
+    "name": "Exfiltration for Macos",
+    "description": "Template for exfiltration attacks on macos",
+    "version": "1.0",
+    "author": "Natasha AI"
+  },
+  "templates": []
+}

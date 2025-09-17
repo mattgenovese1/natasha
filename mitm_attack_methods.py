@@ -1,4 +1,50 @@
-def _show_mitm_attack_menu(self):
+"""MITM UI helper methods bound to NatashaApp at runtime.
+These functions are imported and attached to NatashaApp in main.py.
+"""
+import logging
+import time
+import threading
+
+
+def _mitm_ui_refresh_loop(self):
+    """Periodically refresh the MITM running screen while the state is RUNNING."""
+    try:
+        while True:
+            try:
+                if hasattr(self, "state_lock"):
+                    with self.state_lock:
+                        running = self.state == AppState.MITM_ATTACK_RUNNING
+                else:
+                    running = self.state == AppState.MITM_ATTACK_RUNNING
+            except Exception:
+                running = False
+            if not running:
+                break
+            # Prefer thread-safe updater if available
+            if hasattr(self, "_update_display_threadsafe"):
+                self._update_display_threadsafe()
+            else:
+                self._update_display()
+            time.sleep(1)
+    except Exception as e:
+        logging.debug(f"MITM UI refresh loop error: {e}")
+
+
+def _start_mitm_ui_refresher(self):
+    """Start a background thread to keep the MITM running UI updated."""
+    try:
+        t = getattr(self, "_mitm_ui_thread", None)
+        if t and getattr(t, "is_alive", lambda: False)():
+            return
+        t = threading.Thread(target=_mitm_ui_refresh_loop, args=(self,))
+        t.daemon = True
+        self._mitm_ui_thread = t
+        t.start()
+    except Exception as e:
+        logging.debug(f"MITM UI refresher start error: {e}")
+
+
+def show_mitm_attack_menu(self):
         """Show the MITM attack menu."""
         self.menu_items = [
             "ARP Spoofing",
@@ -16,7 +62,7 @@ def _show_mitm_attack_menu(self):
         self.display.draw_natasha_avatar(200, 30, expression="thinking")
         self.display.update()
     
-    def _handle_mitm_attack_menu_button(self, button):
+def _handle_mitm_attack_menu_button(self, button):
         """Handle button press in MITM attack menu.
         
         Args:
@@ -51,7 +97,7 @@ def _show_mitm_attack_menu(self):
         
         self._update_display()
     
-    def _show_mitm_attack_config(self):
+def show_mitm_attack_config(self):
         """Show the MITM attack configuration screen."""
         attack_name = self.config_params.get("attack_name", "Unknown")
         
@@ -102,15 +148,57 @@ def _show_mitm_attack_menu(self):
         self.display.draw_natasha_avatar(200, 30, expression="thinking")
         self.display.update()
     
-    def _handle_mitm_attack_config_button(self, button):
+def handle_mitm_attack_config_button(self, button):
         """Handle button press in MITM attack configuration.
         
         Args:
             button: Button that was pressed
         """
-        # This is a simplified implementation
-        # In a real implementation, this would handle configuration parameters
-        if button == "select":
+        # Basic in-screen editing for common parameters using up/down
+        attack_name = self.config_params.get("attack_name", "Unknown")
+
+        if button == "up" or button == "down":
+            try:
+                if attack_name == "ARP Spoofing":
+                    # Toggle simple presets
+                    if button == "up":
+                        self.config_params["target_ip"] = (
+                            "192.168.1.100" if self.config_params.get("target_ip") != "192.168.1.100" else "192.168.1.50"
+                        )
+                    else:
+                        self.config_params["gateway_ip"] = (
+                            "192.168.1.1" if self.config_params.get("gateway_ip") != "192.168.1.1" else "192.168.0.1"
+                        )
+                elif attack_name == "DNS Spoofing":
+                    if button == "up":
+                        self.config_params["domain"] = (
+                            "example.com" if self.config_params.get("domain") != "example.com" else "test.local"
+                        )
+                    else:
+                        self.config_params["redirect_ip"] = (
+                            "192.168.1.100" if self.config_params.get("redirect_ip") != "192.168.1.100" else "192.168.1.1"
+                        )
+                elif attack_name == "SSL Strip":
+                    # Toggle port between 10000 and 8080
+                    current = str(self.config_params.get("port", "10000"))
+                    self.config_params["port"] = "8080" if current == "10000" else "10000"
+                elif attack_name == "Packet Capture":
+                    if button == "up":
+                        cycle = ["", "tcp port 80", "udp port 53"]
+                        cur = self.config_params.get("filter_expr", "")
+                        self.config_params["filter_expr"] = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else cycle[0]
+                    else:
+                        cycle = ["60", "120", "300"]
+                        cur = str(self.config_params.get("duration", "300"))
+                        self.config_params["duration"] = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else cycle[0]
+                elif attack_name == "Session Hijacking":
+                    # Toggle target between two examples
+                    self.config_params["target_ip"] = (
+                        "192.168.1.100" if self.config_params.get("target_ip") != "192.168.1.100" else "192.168.1.50"
+                    )
+            except Exception as e:
+                logging.debug(f"Config toggle error: {e}")
+        elif button == "select":
             # Start the attack
             self.state = AppState.MITM_ATTACK_RUNNING
             self._start_mitm_attack()
@@ -121,7 +209,7 @@ def _show_mitm_attack_menu(self):
         
         self._update_display()
     
-    def _show_mitm_attack_running(self):
+def show_mitm_attack_running(self):
         """Show the MITM attack running screen."""
         attack_name = self.config_params.get("attack_name", "Unknown")
         
@@ -162,7 +250,7 @@ def _show_mitm_attack_menu(self):
         self.display.draw_natasha_avatar(200, 30, expression="success")
         self.display.update()
     
-    def _handle_mitm_attack_running_button(self, button):
+def handle_mitm_attack_running_button(self, button):
         """Handle button press while MITM attack is running.
         
         Args:
@@ -176,7 +264,7 @@ def _show_mitm_attack_menu(self):
             self.menu_start = 0
             self._update_display()
     
-    def _start_mitm_attack(self):
+def start_mitm_attack(self):
         """Start the configured MITM attack."""
         attack_name = self.config_params.get("attack_name", "Unknown")
         logging.info(f"Starting MITM attack: {attack_name}")
@@ -186,6 +274,8 @@ def _show_mitm_attack_menu(self):
         
         # Reset attack results
         self.attack_results = {}
+        # Start periodic UI refresher
+        _start_mitm_ui_refresher(self)
         
         # Start attack based on type
         if attack_name == "ARP Spoofing":
@@ -195,7 +285,7 @@ def _show_mitm_attack_menu(self):
             if self.mitm_attack:
                 success = self.mitm_attack.start_arp_spoof(target_ip, gateway_ip)
                 if success:
-                    self.attack_results = self.mitm_attack.attack_status
+                    self.attack_results = dict(self.mitm_attack.attack_status)
                 else:
                     self.attack_results["status"] = "Failed"
                     self.attack_results["error"] = "Failed to start ARP spoofing attack"
@@ -210,7 +300,7 @@ def _show_mitm_attack_menu(self):
             if self.mitm_attack:
                 success = self.mitm_attack.start_dns_spoof(domain, redirect_ip)
                 if success:
-                    self.attack_results = self.mitm_attack.attack_status
+                    self.attack_results = dict(self.mitm_attack.attack_status)
                 else:
                     self.attack_results["status"] = "Failed"
                     self.attack_results["error"] = "Failed to start DNS spoofing attack"
@@ -224,7 +314,7 @@ def _show_mitm_attack_menu(self):
             if self.mitm_attack:
                 success = self.mitm_attack.start_ssl_strip(port)
                 if success:
-                    self.attack_results = self.mitm_attack.attack_status
+                    self.attack_results = dict(self.mitm_attack.attack_status)
                 else:
                     self.attack_results["status"] = "Failed"
                     self.attack_results["error"] = "Failed to start SSL stripping attack"
@@ -239,7 +329,7 @@ def _show_mitm_attack_menu(self):
             if self.mitm_attack:
                 success = self.mitm_attack.start_packet_capture(filter_expr, duration)
                 if success:
-                    self.attack_results = self.mitm_attack.attack_status
+                    self.attack_results = dict(self.mitm_attack.attack_status)
                 else:
                     self.attack_results["status"] = "Failed"
                     self.attack_results["error"] = "Failed to start packet capture"
@@ -253,7 +343,7 @@ def _show_mitm_attack_menu(self):
             if self.mitm_attack:
                 success = self.mitm_attack.start_session_hijack(target_ip)
                 if success:
-                    self.attack_results = self.mitm_attack.attack_status
+                    self.attack_results = dict(self.mitm_attack.attack_status)
                 else:
                     self.attack_results["status"] = "Failed"
                     self.attack_results["error"] = "Failed to start session hijacking attack"
@@ -261,7 +351,7 @@ def _show_mitm_attack_menu(self):
                 self.attack_results["status"] = "Failed"
                 self.attack_results["error"] = "MITM attack module not available"
     
-    def _stop_mitm_attack(self):
+def stop_mitm_attack(self):
         """Stop the running MITM attack."""
         logging.info("Stopping MITM attack")
         

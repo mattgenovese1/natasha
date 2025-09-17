@@ -8,14 +8,26 @@ HID Emulation Module
 This module implements the USB HID (Human Interface Device) emulation functionality,
 allowing the Raspberry Pi Zero 2 W to act as a keyboard device for executing
 DuckyScript payloads on target systems.
+
+Improvements:
+- Persistent HID device handle with guarded writes and retries
+- Configurable inter-report delay and default per-character delay
+- Extended DuckyScript support: DEFAULTDELAY/DEFAULT_DELAY, DEFAULTCHARDELAY, REPEAT, hyphenated combos (e.g., ALT-F4), KEYDOWN/KEYUP
+- Safe key mapping for single-letter tokens in combos (avoid unintended Shift)
+- Optional external keymap override from ~/.natasha/keymap.json
+- Non-intrusive OS detection (no keystrokes)
+- Additional debug logging for parsing and actions
 """
 
 import os
 import time
+import json
+import random
 import logging
 import threading
 from typing import Dict, List, Optional, Union, Tuple
 from enum import Enum
+
 
 class KeyCode(Enum):
     """USB HID keyboard scan codes for common keys."""
@@ -29,7 +41,7 @@ class KeyCode(Enum):
     MOD_RSHIFT = 0x20
     MOD_RALT = 0x40
     MOD_RMETA = 0x80  # Right Windows/Command key
-    
+
     # Standard keys
     KEY_NONE = 0x00
     KEY_A = 0x04
@@ -143,67 +155,102 @@ class KeyCode(Enum):
     KEY_F23 = 0x72
     KEY_F24 = 0x73
 
+
 class HIDEmulator:
     """USB HID Emulator for keyboard emulation."""
-    
+
     # HID report structure: [modifier, reserved, Key1, Key2, Key3, Key4, Key5, Key6]
     REPORT_LENGTH = 8
-    
-    def __init__(self, hid_device_path: str = "/dev/hidg0"):
+
+    def __init__(
+        self,
+        hid_device_path: str = "/dev/hidg0",
+        inter_report_delay: float = 0.015,
+        default_char_delay: float = 0.015,
+        keymap_path: Optional[str] = None,
+    ):
         """Initialize the HID Emulator.
-        
+
         Args:
             hid_device_path: Path to the USB HID gadget device
+            inter_report_delay: Sleep (s) after each HID report to improve reliability
+            default_char_delay: Default delay (s) between characters when typing strings
+            keymap_path: Optional path to JSON keymap overrides
         """
         self.hid_device_path = hid_device_path
-        self.device = None
-        self.lock = threading.Lock()
+        self.device: Optional[object] = None
+        self.lock = threading.RLock()
         self.key_state = bytearray(self.REPORT_LENGTH)
-        self.char_to_key = self._build_char_map()
+        self.inter_report_delay = max(0.0, inter_report_delay)
+        self.default_char_delay = max(0.0, default_char_delay)
+        self.default_command_delay_ms = 0  # set via DEFAULTDELAY/DEFAULT_DELAY
+        self.last_executable_command: Optional[str] = None
+
+        self.char_to_key = self._build_char_map(keymap_path)
         self.duckyscript_commands = self._build_duckyscript_commands()
-        
-        # Check if HID device exists
-        self._check_hid_device()
-    
-    def _check_hid_device(self) -> None:
-        """Check if the HID device exists and is accessible."""
+
+        # Check and open HID device
+        self._check_and_open_hid_device()
+
+    # ----------------------- Device management -----------------------
+    def _check_and_open_hid_device(self) -> None:
+        """Ensure HID device exists and open a persistent handle."""
         if not os.path.exists(self.hid_device_path):
             logging.error(f"HID device not found: {self.hid_device_path}")
             logging.info("USB HID gadget may not be configured. Run setup_usb_hid.sh first.")
             raise FileNotFoundError(f"HID device not found: {self.hid_device_path}")
-        
+        self._open_device()
+
+    def _open_device(self) -> None:
+        """Open the HID device and store the handle."""
         try:
-            # Test opening the device
-            with open(self.hid_device_path, 'wb') as f:
-                pass
+            # buffering=0 may not be supported on all systems; rely on flush
+            self.device = open(self.hid_device_path, 'wb')
             logging.info(f"HID device ready: {self.hid_device_path}")
         except Exception as e:
             logging.error(f"Failed to access HID device: {e}")
+            self.device = None
             raise
-    
-    def _build_char_map(self) -> Dict[str, Tuple[int, int]]:
+
+    def _reopen_device(self) -> None:
+        """Attempt to reopen the HID device after an error."""
+        try:
+            if self.device:
+                try:
+                    self.device.close()
+                except Exception:
+                    pass
+            self.device = None
+            time.sleep(0.05)
+            self._open_device()
+        except Exception as e:
+            logging.error(f"Failed to reopen HID device: {e}")
+            raise
+
+    # ----------------------- Key mapping -----------------------
+    def _build_char_map(self, keymap_path: Optional[str]) -> Dict[str, Tuple[int, int]]:
         """Build a mapping from characters to (modifier, keycode) pairs.
-        
+
         Returns:
             Dictionary mapping characters to (modifier, keycode) pairs
         """
-        char_map = {}
-        
+        char_map: Dict[str, Tuple[int, int]] = {}
+
         # Lowercase letters
         for c in "abcdefghijklmnopqrstuvwxyz":
             keycode = getattr(KeyCode, f"KEY_{c.upper()}").value
             char_map[c] = (KeyCode.MOD_NONE.value, keycode)
-        
-        # Uppercase letters
+
+        # Uppercase letters (shifted)
         for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
             keycode = getattr(KeyCode, f"KEY_{c}").value
             char_map[c] = (KeyCode.MOD_LSHIFT.value, keycode)
-        
+
         # Numbers
-        for i, c in enumerate("1234567890"):
+        for c in "1234567890":
             keycode = getattr(KeyCode, f"KEY_{c}").value
             char_map[c] = (KeyCode.MOD_NONE.value, keycode)
-        
+
         # Special characters (unshifted)
         char_map[' '] = (KeyCode.MOD_NONE.value, KeyCode.KEY_SPACE.value)
         char_map['-'] = (KeyCode.MOD_NONE.value, KeyCode.KEY_MINUS.value)
@@ -217,7 +264,7 @@ class HIDEmulator:
         char_map[','] = (KeyCode.MOD_NONE.value, KeyCode.KEY_COMMA.value)
         char_map['.'] = (KeyCode.MOD_NONE.value, KeyCode.KEY_DOT.value)
         char_map['/'] = (KeyCode.MOD_NONE.value, KeyCode.KEY_SLASH.value)
-        
+
         # Special characters (shifted)
         char_map['!'] = (KeyCode.MOD_LSHIFT.value, KeyCode.KEY_1.value)
         char_map['@'] = (KeyCode.MOD_LSHIFT.value, KeyCode.KEY_2.value)
@@ -240,25 +287,33 @@ class HIDEmulator:
         char_map['<'] = (KeyCode.MOD_LSHIFT.value, KeyCode.KEY_COMMA.value)
         char_map['>'] = (KeyCode.MOD_LSHIFT.value, KeyCode.KEY_DOT.value)
         char_map['?'] = (KeyCode.MOD_LSHIFT.value, KeyCode.KEY_SLASH.value)
-        
+
+        # Optional external keymap overrides
+        try:
+            override_path = keymap_path or os.path.join(os.path.expanduser("~"), "natasha", "keymap.json")
+            if os.path.exists(override_path):
+                with open(override_path, 'r') as f:
+                    data = json.load(f)
+                # Expected format: {"char": {"modifier": int, "keycode": int}}
+                for ch, mk in data.items():
+                    if isinstance(mk, dict) and "modifier" in mk and "keycode" in mk:
+                        char_map[ch] = (int(mk["modifier"]), int(mk["keycode"]))
+                logging.info(f"Loaded keymap overrides from {override_path}")
+        except Exception as e:
+            logging.warning(f"Failed to load keymap overrides: {e}")
+
         return char_map
-    
+
     def _build_duckyscript_commands(self) -> Dict[str, Tuple[int, int]]:
-        """Build a mapping from DuckyScript commands to (modifier, keycode) pairs.
-        
-        Returns:
-            Dictionary mapping DuckyScript commands to (modifier, keycode) pairs
-        """
-        commands = {}
-        
-        # Modifier keys
+        """Build a mapping from DuckyScript commands to (modifier, keycode) pairs."""
+        commands: Dict[str, Tuple[int, int]] = {}
+        # Modifiers
         commands["CTRL"] = (KeyCode.MOD_LCTRL.value, KeyCode.KEY_NONE.value)
         commands["CONTROL"] = (KeyCode.MOD_LCTRL.value, KeyCode.KEY_NONE.value)
         commands["SHIFT"] = (KeyCode.MOD_LSHIFT.value, KeyCode.KEY_NONE.value)
         commands["ALT"] = (KeyCode.MOD_LALT.value, KeyCode.KEY_NONE.value)
         commands["GUI"] = (KeyCode.MOD_LMETA.value, KeyCode.KEY_NONE.value)
         commands["WINDOWS"] = (KeyCode.MOD_LMETA.value, KeyCode.KEY_NONE.value)
-        
         # Special keys
         commands["ENTER"] = (KeyCode.MOD_NONE.value, KeyCode.KEY_ENTER.value)
         commands["ESCAPE"] = (KeyCode.MOD_NONE.value, KeyCode.KEY_ESC.value)
@@ -289,232 +344,272 @@ class HIDEmulator:
         commands["NUMLOCK"] = (KeyCode.MOD_NONE.value, KeyCode.KEY_NUMLOCK.value)
         commands["MENU"] = (KeyCode.MOD_NONE.value, KeyCode.KEY_COMPOSE.value)
         commands["APP"] = (KeyCode.MOD_NONE.value, KeyCode.KEY_COMPOSE.value)
-        
         # Function keys
         for i in range(1, 25):
             commands[f"F{i}"] = (KeyCode.MOD_NONE.value, getattr(KeyCode, f"KEY_F{i}").value)
-        
         return commands
-    
+
+    # ----------------------- Low-level send -----------------------
     def _send_report(self, report: bytearray) -> None:
-        """Send a HID report to the device.
-        
+        """Send a HID report with retries.
+
         Args:
             report: HID report to send
         """
-        try:
-            with open(self.hid_device_path, 'wb') as device:
-                device.write(report)
-                device.flush()
-        except Exception as e:
-            logging.error(f"Failed to send HID report: {e}")
-            raise
-    
+        if not self.device:
+            self._reopen_device()
+        last_exc: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                assert self.device is not None
+                self.device.write(report)
+                self.device.flush()
+                if self.inter_report_delay > 0:
+                    time.sleep(self.inter_report_delay)
+                return
+            except Exception as e:
+                logging.warning(f"HID write failed (attempt {attempt+1}): {e}")
+                last_exc = e
+                try:
+                    self._reopen_device()
+                except Exception as e2:
+                    last_exc = e2
+                    break
+        logging.error(f"Failed to send HID report after retries: {last_exc}")
+        raise last_exc  # type: ignore
+
     def _reset_report(self) -> None:
         """Reset the HID report to all zeros (no keys pressed)."""
         self.key_state = bytearray(self.REPORT_LENGTH)
         self._send_report(self.key_state)
-    
+
+    # ----------------------- High-level actions -----------------------
     def press_key(self, modifier: int, key: int) -> None:
-        """Press a key with the specified modifier.
-        
-        Args:
-            modifier: Modifier key code
-            key: Key code
-        """
+        """Press a key with the specified modifier, then release."""
         with self.lock:
-            # Set modifier
             self.key_state[0] = modifier
-            # Set key
             self.key_state[2] = key
-            # Send report
             self._send_report(self.key_state)
-            # Reset report (release all keys)
             self._reset_report()
-    
+
     def press_keys(self, keys: List[Tuple[int, int]]) -> None:
-        """Press multiple keys simultaneously.
-        
-        Args:
-            keys: List of (modifier, key) tuples
-        """
+        """Press multiple keys simultaneously (up to 6), then release."""
         with self.lock:
-            # Reset report
             self.key_state = bytearray(self.REPORT_LENGTH)
-            
-            # Set modifiers (combine all modifiers)
             modifier = 0
             for mod, _ in keys:
                 modifier |= mod
             self.key_state[0] = modifier
-            
-            # Set keys (up to 6 keys)
             for i, (_, key) in enumerate(keys[:6]):
                 self.key_state[2 + i] = key
-            
-            # Send report
             self._send_report(self.key_state)
-            
-            # Reset report (release all keys)
             self._reset_report()
-    
+
+    def hold_key(self, modifier: int, key: int) -> None:
+        """Hold a key down without releasing it."""
+        with self.lock:
+            self.key_state[0] = modifier
+            self.key_state[2] = key
+            self._send_report(self.key_state)
+
+    def release_key(self) -> None:
+        """Release all held keys."""
+        with self.lock:
+            self._reset_report()
+
     def type_character(self, char: str) -> None:
-        """Type a single character.
-        
-        Args:
-            char: Character to type
-        """
+        """Type a single character using char map."""
         if char in self.char_to_key:
             modifier, key = self.char_to_key[char]
             self.press_key(modifier, key)
         else:
             logging.warning(f"Character not in keymap: {char}")
-    
-    def type_string(self, string: str, delay: float = 0.0) -> None:
-        """Type a string of characters.
-        
-        Args:
-            string: String to type
-            delay: Delay between keystrokes in seconds
-        """
+
+    def type_string(self, string: str, delay: Optional[float] = None) -> None:
+        """Type a string of characters, with delay between chars."""
+        per_char_delay = self.default_char_delay if delay is None else max(0.0, delay)
         for char in string:
             self.type_character(char)
-            if delay > 0:
-                time.sleep(delay)
-    
-    def execute_command(self, command: str) -> None:
-        """Execute a DuckyScript command.
-        
-        Args:
-            command: DuckyScript command to execute
+            if per_char_delay > 0:
+                time.sleep(per_char_delay)
+
+    # ----------------------- DuckyScript parsing -----------------------
+    def _parse_combo_tokens(self, tokens: List[str]) -> List[Tuple[int, int]]:
+        """Parse tokens for a single combo into a list of (modifier,key) tuples.
+        This respects that single-letter tokens should not implicitly apply SHIFT.
         """
-        # Split command into parts
-        parts = command.strip().split()
-        
-        if not parts:
-            return
-        
-        # Handle special commands
-        if parts[0] == "REM":
-            # Comment, do nothing
-            return
-        elif parts[0] == "DELAY":
-            # Delay in milliseconds
-            if len(parts) > 1:
-                try:
-                    delay_ms = int(parts[1])
-                    time.sleep(delay_ms / 1000.0)
-                except ValueError:
-                    logging.warning(f"Invalid DELAY value: {parts[1]}")
-            return
-        elif parts[0] == "STRING":
-            # Type a string
-            if len(parts) > 1:
-                string = command[7:]  # Remove "STRING "
-                self.type_string(string)
-            return
-        elif parts[0] == "STRINGLN":
-            # Type a string followed by Enter
-            if len(parts) > 1:
-                string = command[9:]  # Remove "STRINGLN "
-                self.type_string(string)
-                self.press_key(KeyCode.MOD_NONE.value, KeyCode.KEY_ENTER.value)
-            else:
-                self.press_key(KeyCode.MOD_NONE.value, KeyCode.KEY_ENTER.value)
-            return
-        
-        # Handle key combinations
-        keys = []
+        keys: List[Tuple[int, int]] = []
         modifier = KeyCode.MOD_NONE.value
-        
-        for part in parts:
-            part = part.upper()
-            
-            # Check if it's a modifier key
-            if part in ["CTRL", "CONTROL", "SHIFT", "ALT", "GUI", "WINDOWS"]:
-                if part in ["CTRL", "CONTROL"]:
+
+        for token in tokens:
+            part = token.upper()
+            # Modifiers accumulate
+            if part in ("CTRL", "CONTROL", "SHIFT", "ALT", "GUI", "WINDOWS"):
+                if part in ("CTRL", "CONTROL"):
                     modifier |= KeyCode.MOD_LCTRL.value
                 elif part == "SHIFT":
                     modifier |= KeyCode.MOD_LSHIFT.value
                 elif part == "ALT":
                     modifier |= KeyCode.MOD_LALT.value
-                elif part in ["GUI", "WINDOWS"]:
+                elif part in ("GUI", "WINDOWS"):
                     modifier |= KeyCode.MOD_LMETA.value
-            
-            # Check if it's a special key
-            elif part in self.duckyscript_commands:
+                continue
+
+            # Known special key
+            if part in self.duckyscript_commands:
                 cmd_mod, cmd_key = self.duckyscript_commands[part]
                 keys.append((modifier | cmd_mod, cmd_key))
-                modifier = KeyCode.MOD_NONE.value  # Reset modifier after each key
-            
-            # Check if it's a single character
-            elif len(part) == 1 and part in self.char_to_key:
-                char_mod, char_key = self.char_to_key[part]
+                modifier = KeyCode.MOD_NONE.value
+                continue
+
+            # Single-letter key token: use lowercase mapping to avoid implicit shift
+            if len(part) == 1 and part.isalpha():
+                lower = part.lower()
+                if lower in self.char_to_key:
+                    char_mod, char_key = self.char_to_key[lower]
+                    keys.append((modifier | char_mod, char_key))
+                    modifier = KeyCode.MOD_NONE.value
+                    continue
+
+            # Digit or symbol present in char map as-is
+            if token in self.char_to_key:
+                char_mod, char_key = self.char_to_key[token]
                 keys.append((modifier | char_mod, char_key))
-                modifier = KeyCode.MOD_NONE.value  # Reset modifier after each key
-        
-        # Press all keys
+                modifier = KeyCode.MOD_NONE.value
+                continue
+
+            logging.debug(f"Unrecognized token in combo: {token}")
+
+        return keys
+
+    def execute_command(self, command: str) -> None:
+        """Execute a single DuckyScript command line."""
+        raw = command.rstrip("\n")
+        line = raw.strip()
+        if not line:
+            return
+
+        logging.debug(f"Executing DuckyScript line: {line}")
+
+        parts = line.split()
+        head = parts[0].upper()
+
+        # Comments
+        if head == "REM":
+            return
+
+        # Timing controls
+        if head in ("DELAY",):
+            if len(parts) > 1:
+                try:
+                    delay_ms = int(parts[1])
+                    time.sleep(max(0, delay_ms) / 1000.0)
+                except ValueError:
+                    logging.warning(f"Invalid DELAY value: {parts[1]}")
+            return
+        if head in ("DEFAULTDELAY", "DEFAULT_DELAY"):
+            if len(parts) > 1:
+                try:
+                    self.default_command_delay_ms = max(0, int(parts[1]))
+                except ValueError:
+                    logging.warning(f"Invalid DEFAULTDELAY value: {parts[1]}")
+            return
+        if head in ("DEFAULTCHARDELAY", "DEFAULT_CHAR_DELAY"):
+            if len(parts) > 1:
+                try:
+                    self.default_char_delay = max(0.0, int(parts[1]) / 1000.0)
+                except ValueError:
+                    logging.warning(f"Invalid DEFAULTCHARDELAY value: {parts[1]}")
+            return
+
+        # STRING variants
+        if head == "STRING":
+            text = raw[7:] if len(raw) >= 7 else ""
+            self.type_string(text)
+            self.last_executable_command = line
+            return
+        if head == "STRINGLN":
+            text = raw[9:] if len(raw) >= 9 else ""
+            self.type_string(text)
+            self.press_key(KeyCode.MOD_NONE.value, KeyCode.KEY_ENTER.value)
+            self.last_executable_command = line
+            return
+
+        # REPEAT last executable command
+        if head == "REPEAT":
+            count = 1
+            if len(parts) > 1:
+                try:
+                    count = max(1, int(parts[1]))
+                except ValueError:
+                    logging.warning(f"Invalid REPEAT count: {parts[1]}")
+            if self.last_executable_command:
+                for _ in range(count):
+                    self.execute_command(self.last_executable_command)
+                    if self.default_command_delay_ms > 0:
+                        time.sleep(self.default_command_delay_ms / 1000.0)
+            else:
+                logging.debug("REPEAT with no prior executable command")
+            return
+
+        # KEYDOWN/KEYUP support
+        if head in ("KEYDOWN", "KEYUP"):
+            if head == "KEYUP":
+                self.release_key()
+                return
+            # KEYDOWN <combo>
+            tokens = [p for p in parts[1:]]
+            # Support hyphenated token as a single combo chunk
+            expanded: List[str] = []
+            for t in tokens:
+                expanded.extend(t.split('-'))
+            keys = self._parse_combo_tokens(expanded)
+            if keys:
+                # Only support a single primary key with modifiers for hold
+                mod = 0
+                primary_key = None
+                for m, k in keys:
+                    mod |= m
+                    if k != KeyCode.KEY_NONE.value and primary_key is None:
+                        primary_key = k
+                if primary_key is not None:
+                    self.hold_key(mod, primary_key)
+            self.last_executable_command = line
+            return
+
+        # Key combos (including hyphenated)
+        tokens: List[str] = []
+        for p in parts:
+            tokens.extend(p.split('-'))
+        keys = self._parse_combo_tokens(tokens)
         if keys:
             self.press_keys(keys)
-    
+            self.last_executable_command = line
+        else:
+            logging.debug(f"No actionable keys for line: {line}")
+
     def execute_script(self, script: str, jitter: bool = False, jitter_max: int = 20) -> None:
-        """Execute a DuckyScript.
-        
-        Args:
-            script: DuckyScript to execute
-            jitter: Whether to add random delays between commands
-            jitter_max: Maximum jitter delay in milliseconds
-        """
+        """Execute a DuckyScript (multi-line)."""
         lines = script.split('\n')
-        
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            
             self.execute_command(line)
-            
+            # Default per-line delay if configured
+            if self.default_command_delay_ms > 0:
+                time.sleep(self.default_command_delay_ms / 1000.0)
             # Add jitter if enabled
             if jitter:
-                jitter_delay = random.randint(0, jitter_max) / 1000.0
+                jitter_delay = random.randint(0, max(0, jitter_max)) / 1000.0
                 time.sleep(jitter_delay)
-    
-    def hold_key(self, modifier: int, key: int) -> None:
-        """Hold a key down without releasing it.
-        
-        Args:
-            modifier: Modifier key code
-            key: Key code
-        """
-        with self.lock:
-            # Set modifier
-            self.key_state[0] = modifier
-            # Set key
-            self.key_state[2] = key
-            # Send report
-            self._send_report(self.key_state)
-    
-    def release_key(self) -> None:
-        """Release all held keys."""
-        with self.lock:
-            self._reset_report()
-    
+
+    # ----------------------- OS detection -----------------------
     def detect_target_os(self) -> str:
         """Attempt to detect the target OS based on USB enumeration behavior.
-        
-        Returns:
-            Detected OS name or "unknown"
-        """
-        # This is a placeholder for actual OS detection logic
-        # In a real implementation, this would analyze USB enumeration patterns
-        
-        logging.info("Attempting to detect target OS...")
-        
-        # Press a key that triggers different behaviors on different OSes
-        self.press_key(KeyCode.MOD_LMETA.value, KeyCode.KEY_SPACE.value)
-        
-        # In a real implementation, we would analyze the response
-        # For now, just return unknown
+        Non-intrusive placeholder (no keystrokes)."""
+        logging.info("Attempting to detect target OS (non-intrusive placeholder)...")
+        # In a real implementation, analyze USB enumeration/timing/identifiers
         return "unknown"
 
 
@@ -525,26 +620,28 @@ if __name__ == "__main__":
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    
+
     try:
         # Initialize the HID Emulator
         emulator = HIDEmulator()
-        
+
         # Test typing a string
-        emulator.type_string("Hello, World!")
-        
+        emulator.type_string("Hello, World!", delay=0.02)
+
         # Test pressing Enter
         emulator.press_key(KeyCode.MOD_NONE.value, KeyCode.KEY_ENTER.value)
-        
-        # Test executing a DuckyScript command
+
+        # Test executing DuckyScript commands
         emulator.execute_command("GUI r")
-        time.sleep(0.5)
+        emulator.execute_command("DELAY 500")
         emulator.execute_command("STRING notepad")
         emulator.execute_command("ENTER")
-        time.sleep(1)
+        emulator.execute_command("DELAY 800")
         emulator.execute_command("STRING This is a test from Natasha AI")
         emulator.execute_command("ENTER")
-        
+        emulator.execute_command("DEFAULTDELAY 200")
+        emulator.execute_command("ALT-F4")
+
         logging.info("HID Emulator test completed successfully")
     except Exception as e:
         logging.error(f"HID Emulator test failed: {e}")

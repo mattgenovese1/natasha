@@ -1,0 +1,9 @@
+{
+  "metadata": {
+    "name": "Exfiltration for Windows",
+    "description": "Template for exfiltration attacks on windows",
+    "version": "1.0",
+    "author": "Natasha AI"
+  },
+  "templates": []
+}
